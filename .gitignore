@@ -1,0 +1,37 @@
+# Certificates and secrets — NEVER commit these
+esp32/main/secrets.h
+secrets.h
+*.pem
+*.key
+*.crt
+*.cert
+*.private
+.env
+certs/
+credentials/
+aws/certs/
+
+# ESP32 / Arduino / PlatformIO
+.pio/
+build/
+*.bin
+*.elf
+*.map
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# AWS / deployment outputs
+.aws-sam/
+cdk.out/
+
+# IDEs
+.vscode/
+.idea/
+
+# System files
+.DS_Store
+Thumbs.db
