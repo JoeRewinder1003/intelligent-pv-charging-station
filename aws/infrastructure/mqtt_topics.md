@@ -1,42 +1,123 @@
 # MQTT Topic Structure
 
-## Overview
+This document defines the MQTT topic structure used by the ESP32-based solar charging station and the AWS cloud backend.
 
-Two types of topics are used in this architecture:
+## General Naming Convention
 
-- **Basic Ingest topics** (`$aws/rules/...`): used by the ESP32 to publish
-  telemetry and events toward AWS. Messages go directly to the IoT Rule engine
-  without passing through the standard MQTT broker, which reduces messaging cost.
+All station-specific topics follow this format:
 
-- **Standard MQTT topics** (`station/...`): used by AWS to publish commands
-  back to the ESP32. The ESP32 subscribes to these topics at startup.
+```text
+station/{station_id}/{message_type}
+```
 
----
+Example:
 
-## Topic Table
+```text
+station/station_001/telemetry
+```
 
-| Topic | Direction | Type | Publisher | Subscriber |
-|---|---|---|---|---|
-| `$aws/rules/TelemetryRule/station/{station_id}/telemetry/raw` | ESP32 → AWS | Basic Ingest | ESP32 | IoT Rule |
-| `$aws/rules/FaultRule/station/{station_id}/events/fault` | ESP32 → AWS | Basic Ingest | ESP32 | IoT Rule |
-| `$aws/rules/ChargingRule/station/{station_id}/events/charging` | ESP32 → AWS | Basic Ingest | ESP32 | IoT Rule |
-| `$aws/rules/HeartbeatRule/station/{station_id}/status/heartbeat` | ESP32 → AWS | Basic Ingest | ESP32 | IoT Rule |
-| `$aws/rules/AckRule/station/{station_id}/ack/command` | ESP32 → AWS | Basic Ingest | ESP32 | IoT Rule |
-| `station/{station_id}/commands/mode` | AWS → ESP32 | Standard MQTT | Lambda | ESP32 |
-| `station/{station_id}/commands/outputs` | AWS → ESP32 | Standard MQTT | Lambda | ESP32 |
-| `station/{station_id}/commands/tracking` | AWS → ESP32 | Standard MQTT | Lambda | ESP32 |
-| `station/{station_id}/commands/safety` | AWS → ESP32 | Standard MQTT | Lambda | ESP32 |
-| `station/{station_id}/commands/config` | AWS → ESP32 | Standard MQTT | Lambda | ESP32 |
-| `station/{station_id}/commands/ota` | AWS → ESP32 | Standard MQTT | Lambda | ESP32 |
+The `{station_id}` field uniquely identifies the charging station. For the first prototype, the default station ID is:
 
----
+```text
+station_001
+```
 
-## Notes
+## Main MQTT Topics
 
-- `{station_id}` is a fixed string per physical station, e.g. `solar_station_01`.
-- Basic Ingest topics are not visible to other MQTT clients — they go directly
-  to the rule engine. This is intentional and saves cost.
-- The ESP32 subscribes to `station/{station_id}/commands/#` using a wildcard
-  so it receives all command subtopics with a single subscription.
-- OTA commands are delivered through `commands/ota` and contain a pre-signed
-  S3 URL. The ESP32 downloads the firmware binary directly from S3 over HTTPS.
+| Topic                            | Direction   | Publisher                 | Subscriber                    | Purpose                                               |
+| -------------------------------- | ----------- | ------------------------- | ----------------------------- | ----------------------------------------------------- |
+| `station/{station_id}/telemetry` | ESP32 → AWS | ESP32                     | AWS IoT Rule / Lambda         | Periodic sensor and energy data                       |
+| `station/{station_id}/status`    | ESP32 → AWS | ESP32                     | AWS IoT Rule / Lambda         | Current operating mode and system state               |
+| `station/{station_id}/faults`    | ESP32 → AWS | ESP32                     | AWS IoT Rule / Lambda         | Fault events, safety lockouts, and invalid data flags |
+| `station/{station_id}/commands`  | AWS → ESP32 | Command Dispatcher Lambda | ESP32                         | Cloud-generated operating commands                    |
+| `station/{station_id}/acks`      | ESP32 → AWS | ESP32                     | Diagnostics Lambda / DynamoDB | Acknowledgement of received commands                  |
+| `station/{station_id}/config`    | AWS → ESP32 | AWS backend               | ESP32                         | Future configuration updates                          |
+
+## Telemetry Topic
+
+```text
+station/{station_id}/telemetry
+```
+
+This topic is used for periodic data sent from the ESP32 to AWS. The telemetry payload includes battery data, PV data, environmental measurements, output states, and selected decision variables.
+
+Suggested publishing interval:
+
+```text
+15 seconds
+```
+
+## Status Topic
+
+```text
+station/{station_id}/status
+```
+
+This topic reports the current state of the station, including the active operating mode, requested mode, FIS recommendation, active outputs, and control state.
+
+## Faults Topic
+
+```text
+station/{station_id}/faults
+```
+
+This topic is used when the ESP32 detects a relevant event such as:
+
+* Critical safety lockout
+* Invalid sensor data
+* Low-battery protection
+* Output blocking
+* Tracking inhibition
+* Stale data
+* Manual fault condition
+
+## Commands Topic
+
+```text
+station/{station_id}/commands
+```
+
+This topic is used by the cloud backend to send commands to the station.
+
+Possible command types include:
+
+```text
+AUTO
+STOP
+NEUTRAL
+ENABLE_TRACKING
+DISABLE_TRACKING
+ENABLE_OUTPUT_1
+ENABLE_OUTPUT_2
+ENABLE_OUTPUT_3
+DISABLE_OUTPUTS
+LOCKOUT
+CLEAR_LOCKOUT
+```
+
+The ESP32 must validate every received command before applying it. Cloud commands should never bypass the local deterministic safety layer.
+
+## Acknowledgement Topic
+
+```text
+station/{station_id}/acks
+```
+
+This topic is used by the ESP32 to confirm whether a cloud command was received, accepted, rejected, or blocked by local safety logic.
+
+## Configuration Topic
+
+```text
+station/{station_id}/config
+```
+
+This topic is reserved for future configuration updates, such as:
+
+* SOC thresholds
+* Output current limits
+* Demand table parameters
+* Tracking limits
+* Telemetry interval
+* FIS parameter updates
+
+Configuration messages should be versioned and validated before being applied.

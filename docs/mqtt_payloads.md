@@ -1,168 +1,236 @@
-# MQTT Payload Reference
+# MQTT Payload Definitions
 
-## 1. Telemetry payload (ESP32 → AWS)
+This document defines the initial JSON payloads exchanged between the ESP32 solar charging station and the AWS cloud backend.
 
-Published every 15–30 seconds to:
-`$aws/rules/TelemetryRule/station/{station_id}/telemetry/raw`
+## 1. Telemetry Payload
+
+Topic:
+
+```text
+station/{station_id}/telemetry
+```
+
+Direction:
+
+```text
+ESP32 → AWS
+```
+
+Example:
 
 ```json
 {
-  "station_id": "solar_station_01",
-  "timestamp": "2026-07-04T17:30:00-06:00",
-  "battery_soc": 91.4,
-  "battery_voltage": 12.8,
-  "battery_current": -8.2,
-  "p_net": -105.0,
-  "local_irradiance": 620.0,
-  "shortwave_radiation": 730.0,
-  "cloud_cover": 25.0,
-  "precipitation_probability": 10.0,
-  "demand_index": 0.65,
-  "active_outputs": 2,
-  "tracking_angle": 34.5,
+  "station_id": "station_001",
+  "timestamp": "2026-07-09T21:00:00Z",
+  "battery": {
+    "voltage_v": 12.7,
+    "current_a": -5.2,
+    "power_w": -66.0,
+    "soc_percent": 92.5
+  },
+  "pv": {
+    "voltage_v": 19.8,
+    "current_a": 12.4,
+    "power_w": 245.5,
+    "local_irradiance_wm2": 720.0
+  },
+  "environment": {
+    "ambient_temperature_c": 28.4,
+    "relative_humidity_percent": 46.0,
+    "panel_temperature_c": 45.3
+  },
+  "outputs": {
+    "output_1_active": true,
+    "output_2_active": true,
+    "output_3_active": false,
+    "output_1_current_a": 1.62,
+    "output_2_current_a": 1.58,
+    "output_3_current_a": 0.0
+  },
+  "tracking": {
+    "enabled": true,
+    "angle_deg": 28.5,
+    "target_angle_deg": 30.0,
+    "master_position_raw": 2040,
+    "slave_position_raw": 2025
+  },
+  "decision": {
+    "weather_index": 0.78,
+    "demand_index": 0.62,
+    "fis_mode": "M4",
+    "requested_mode": "M4",
+    "operating_mode": "M4"
+  },
   "fault_state": "normal"
 }
 ```
 
-Field notes:
-- `p_net` is negative when load exceeds PV generation (battery discharging).
-- `local_irradiance` is measured by the local pyranometer on the ESP32.
-- `shortwave_radiation`, `cloud_cover`, `precipitation_probability` are
-  fetched from Open-Meteo API and cached on the ESP32 (updated hourly).
-- `demand_index` is computed locally on the ESP32 from charging session history.
-- `fault_state`: `"normal"`, `"warning"`, or `"critical"`.
+## 2. Status Payload
 
----
+Topic:
 
-## 2. Heartbeat payload (ESP32 → AWS)
-
-Published every 60 seconds to:
-`$aws/rules/HeartbeatRule/station/{station_id}/status/heartbeat`
-
-```json
-{
-  "station_id": "solar_station_01",
-  "timestamp": "2026-07-04T17:30:00-06:00",
-  "firmware_version": "1.0.0",
-  "uptime_seconds": 3600,
-  "wifi_rssi": -62,
-  "free_heap_bytes": 142000
-}
+```text
+station/{station_id}/status
 ```
 
----
+Direction:
 
-## 3. Fault event payload (ESP32 → AWS)
-
-Published on fault detection (event-driven) to:
-`$aws/rules/FaultRule/station/{station_id}/events/fault`
-
-```json
-{
-  "station_id": "solar_station_01",
-  "timestamp": "2026-07-04T17:35:10-06:00",
-  "fault_type": "overcurrent",
-  "severity": "critical",
-  "description": "Output 2 current exceeded 10A limit",
-  "battery_soc": 88.1
-}
+```text
+ESP32 → AWS
 ```
 
-Possible `fault_type` values:
-- `sensor_failure` — a sensor returned an out-of-range or NaN value
-- `overcurrent` — charging output exceeded current limit
-- `low_battery` — SOC dropped below critical threshold
-- `comms_lost` — MQTT connection lost for more than N minutes
-- `actuator_fault` — linear actuator did not reach target position
-- `overvoltage` — PV or battery voltage exceeded safe limit
-
----
-
-## 4. Charging event payload (ESP32 → AWS)
-
-Published on charging session start or end (event-driven) to:
-`$aws/rules/ChargingRule/station/{station_id}/events/charging`
+Example:
 
 ```json
 {
-  "station_id": "solar_station_01",
-  "timestamp": "2026-07-04T17:40:00-06:00",
-  "event_type": "session_end",
-  "output_id": 2,
-  "duration_minutes": 45,
-  "energy_wh": 87.3
-}
-```
-
-`event_type`: `"session_start"` or `"session_end"`.
-
----
-
-## 5. Command ACK payload (ESP32 → AWS)
-
-Published after the ESP32 applies a received command (event-driven) to:
-`$aws/rules/AckRule/station/{station_id}/ack/command`
-
-```json
-{
-  "station_id": "solar_station_01",
-  "command_id": "cmd_001",
-  "status": "applied",
-  "timestamp": "2026-07-04T17:30:15-06:00"
-}
-```
-
-`status`: `"applied"` or `"rejected"` (rejected if local safety blocked it).
-
----
-
-## 6. Mode command payload (AWS → ESP32)
-
-Published by CommandDispatcherLambda to:
-`station/{station_id}/commands/mode`
-
-```json
-{
-  "command_id": "cmd_001",
-  "station_id": "solar_station_01",
-  "operating_mode": "M3",
-  "active_outputs": 1,
+  "station_id": "station_001",
+  "timestamp": "2026-07-09T21:00:00Z",
+  "system_state": "AUTO",
+  "fis_mode": "M4",
+  "requested_mode": "M4",
+  "operating_mode": "M4",
+  "outputs_active": 2,
   "tracking_allowed": true,
-  "safety_lockout": false,
-  "reason": "Adequate SOC and favorable weather"
+  "charging_allowed": true,
+  "manual_lock": false,
+  "cloud_connected": true,
+  "fault_state": "normal"
 }
 ```
 
-Operating modes:
-- `M0` — Basic / safe mode (no outputs, no tracking)
-- `M1` — Telemetry only
-- `M2` — Solar tracking allowed, no charging outputs
-- `M3` — One charging output active
-- `M4` — Two charging outputs active
-- `M5` — Three charging outputs active
+## 3. Fault Payload
 
----
+Topic:
 
-## 7. OTA firmware update command payload (AWS → ESP32)
+```text
+station/{station_id}/faults
+```
 
-Published by FirmwareUpdateManagerLambda to:
-`station/{station_id}/commands/ota`
+Direction:
+
+```text
+ESP32 → AWS
+```
+
+Example:
 
 ```json
 {
-  "command_id": "ota_007",
-  "station_id": "solar_station_01",
-  "firmware_version": "1.1.0",
-  "download_url": "https://station-firmware-bucket.s3.amazonaws.com/firmware_v1.1.0.bin?X-Amz-Signature=...",
-  "file_size_bytes": 892416,
-  "md5_checksum": "a3f1c2d4e5b6...",
-  "timestamp": "2026-07-04T18:00:00-06:00"
+  "station_id": "station_001",
+  "timestamp": "2026-07-09T21:00:00Z",
+  "fault_state": "non_critical_restriction",
+  "fault_code": "LOW_SOC_TRACKING_INHIBIT",
+  "severity": "warning",
+  "description": "Tracking was inhibited because the battery SOC is below the configured threshold.",
+  "affected_functions": {
+    "tracking": true,
+    "charging_outputs": false,
+    "cloud_commands": false
+  },
+  "measurements": {
+    "soc_percent": 84.7,
+    "battery_power_w": -55.0,
+    "local_irradiance_wm2": 390.0
+  }
 }
 ```
 
-Notes:
-- `download_url` is a pre-signed S3 URL valid for a limited time (e.g. 1 hour).
-- The ESP32 verifies `md5_checksum` after download before applying the update.
-- The ESP32 publishes a fault event if the download or verification fails.
-- OTA updates should only be triggered when `battery_soc` > 50% and
-  `fault_state` is `"normal"`.
+Suggested fault severity levels:
+
+```text
+info
+warning
+critical
+```
+
+Suggested fault states:
+
+```text
+normal
+non_critical_restriction
+data_or_sensor_fault
+critical_lockout
+```
+
+## 4. Command Payload
+
+Topic:
+
+```text
+station/{station_id}/commands
+```
+
+Direction:
+
+```text
+AWS → ESP32
+```
+
+Example:
+
+```json
+{
+  "station_id": "station_001",
+  "timestamp": "2026-07-09T21:00:00Z",
+  "command_id": "cmd-20260709-0001",
+  "command": "ENABLE_OUTPUT_2",
+  "source": "cloud_fis",
+  "parameters": {
+    "requested_mode": "M4",
+    "max_outputs": 2,
+    "tracking_allowed": true
+  }
+}
+```
+
+The ESP32 must validate every command locally before applying it. A command can be rejected if it violates local safety conditions.
+
+## 5. Acknowledgement Payload
+
+Topic:
+
+```text
+station/{station_id}/acks
+```
+
+Direction:
+
+```text
+ESP32 → AWS
+```
+
+Example:
+
+```json
+{
+  "station_id": "station_001",
+  "timestamp": "2026-07-09T21:00:00Z",
+  "command_id": "cmd-20260709-0001",
+  "command": "ENABLE_OUTPUT_2",
+  "status": "accepted",
+  "applied": true,
+  "resulting_operating_mode": "M4",
+  "message": "Command accepted and applied."
+}
+```
+
+Possible acknowledgement statuses:
+
+```text
+received
+accepted
+rejected
+blocked_by_safety
+invalid_command
+```
+
+## 6. Design Rule
+
+The cloud backend can recommend or request an operating state, but the ESP32 local deterministic safety layer has final authority over the physical system.
+
+Therefore:
+
+```text
+Cloud decision = recommendation or request
+ESP32 deterministic layer = final authorization
+```
