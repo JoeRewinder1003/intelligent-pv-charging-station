@@ -1,0 +1,42 @@
+{
+  "station_id": "station_001",
+  "timestamp": "2026-07-09T21:00:00Z",
+  "battery": {
+    "voltage_v": 12.7,
+    "current_a": -5.2,
+    "power_w": -66.0,
+    "soc_percent": 92.5
+  },
+  "pv": {
+    "voltage_v": 19.8,
+    "current_a": 12.4,
+    "power_w": 245.5,
+    "local_irradiance_wm2": 720.0
+  },
+  "environment": {
+    "ambient_temperature_c": 28.4,
+    "relative_humidity_percent": 46.0,
+    "panel_temperature_c": 45.3
+  },
+  "outputs": {
+    "output_1_active": true,
+    "output_2_active": true,
+    "output_3_active": false,
+    "output_1_current_a": 1.62,
+    "output_2_current_a": 1.58,
+    "output_3_current_a": 0.0
+  },
+  "tracking": {
+    "enabled": true,
+    "angle_deg": 28.5,
+    "target_angle_deg": 30.0
+  },
+  "decision": {
+    "weather_index": 0.78,
+    "demand_index": 0.62,
+    "fis_mode": "M4",
+    "requested_mode": "M4",
+    "operating_mode": "M4"
+  },
+  "fault_state": "normal"
+}
