@@ -1,144 +1,463 @@
-# DynamoDB Tables
+# DynamoDB Table Design
 
-## Design principles
+This document defines the initial DynamoDB table structure for the AWS cloud backend of the ESP32-based solar charging station.
 
-- DynamoDB is the only database used in v1.
-- All tables use on-demand billing (pay-per-request) to stay within Free Tier
-  for a single-station prototype.
-- No Timestream, no RDS, no ElasticSearch in this version.
-- TTL (Time To Live) is enabled on telemetry records to automatically delete
-  old data and control storage costs.
+The database is designed to store telemetry, system status, fault events, cloud commands, demand profiles, and long-term diagnostic data. The first prototype uses a single station identified as:
 
----
+```text
+station_001
+```
 
-## Table 1: StationTelemetry
-
-Stores every telemetry record received from the ESP32.
-
-| Attribute | Type | Role |
-|---|---|---|
-| `station_id` | String | Partition key |
-| `timestamp` | String (ISO 8601) | Sort key |
-| `battery_soc` | Number | |
-| `battery_voltage` | Number | |
-| `battery_current` | Number | |
-| `p_net` | Number | |
-| `local_irradiance` | Number | |
-| `shortwave_radiation` | Number | |
-| `cloud_cover` | Number | |
-| `precipitation_probability` | Number | |
-| `demand_index` | Number | |
-| `active_outputs` | Number | |
-| `tracking_angle` | Number | |
-| `fault_state` | String | |
-| `weather_index` | Number | Computed by Lambda |
-| `operating_mode` | String | Computed by Lambda |
-| `ttl` | Number | Unix epoch — auto-delete after 90 days |
-
-Access pattern: query by `station_id`, sorted by `timestamp` descending.
+However, the table structure allows future expansion to multiple charging stations.
 
 ---
 
-## Table 2: StationState
+## 1. TelemetryHistory Table
 
-Stores the latest known state of each station. One item per station.
-This table is always overwritten (PutItem), never appended.
+### Purpose
 
-| Attribute | Type | Role |
-|---|---|---|
-| `station_id` | String | Partition key |
-| `last_seen` | String (ISO 8601) | |
-| `battery_soc` | Number | |
-| `operating_mode` | String | |
-| `active_outputs` | Number | |
-| `fault_state` | String | |
-| `weather_index` | Number | |
-| `last_command_id` | String | |
-| `last_command_status` | String | `pending`, `applied`, `timeout` |
-| `firmware_version` | String | |
-| `connection_status` | String | `online`, `offline` |
+Stores periodic telemetry sent by the ESP32, including battery data, PV measurements, environmental variables, output currents, tracking data, and decision variables.
 
-Access pattern: GetItem by `station_id` (single lookup, very cheap).
+### Table Name
 
----
+```text
+TelemetryHistory
+```
 
-## Table 3: StationCommands
+### Keys
 
-Stores every command dispatched to the ESP32 and its acknowledgment status.
+| Key          | Type          | Description                                |
+| ------------ | ------------- | ------------------------------------------ |
+| `station_id` | Partition key | Unique identifier of the charging station  |
+| `timestamp`  | Sort key      | ISO 8601 timestamp of the telemetry sample |
 
-| Attribute | Type | Role |
-|---|---|---|
-| `station_id` | String | Partition key |
-| `command_id` | String | Sort key |
-| `timestamp` | String (ISO 8601) | |
-| `operating_mode` | String | |
-| `active_outputs` | Number | |
-| `tracking_allowed` | Boolean | |
-| `safety_lockout` | Boolean | |
-| `reason` | String | |
-| `ack_status` | String | `pending`, `applied`, `timeout` |
-| `ack_timestamp` | String | Filled when ACK received |
-| `ttl` | Number | Unix epoch — auto-delete after 30 days |
+### Example Item
 
-Access pattern: query by `station_id`, sorted by `command_id` or `timestamp`.
-
----
-
-## Table 4: StationFaults
-
-Stores fault and alert events reported by the ESP32.
-
-| Attribute | Type | Role |
-|---|---|---|
-| `station_id` | String | Partition key |
-| `fault_id` | String | Sort key (UUID or timestamp-based) |
-| `timestamp` | String (ISO 8601) | |
-| `fault_type` | String | e.g. `sensor_failure`, `overcurrent`, `comms_lost` |
-| `severity` | String | `warning`, `critical` |
-| `description` | String | |
-| `resolved` | Boolean | |
-| `resolved_timestamp` | String | |
-| `ttl` | Number | Unix epoch — auto-delete after 180 days |
-
-Access pattern: query by `station_id`, filter by `resolved = false` for active faults.
-
----
-
-## Table 5: StationFirmware
-
-Stores firmware version history and OTA update records.
-
-| Attribute | Type | Role |
-|---|---|---|
-| `station_id` | String | Partition key |
-| `firmware_version` | String | Sort key |
-| `timestamp` | String (ISO 8601) | |
-| `s3_key` | String | S3 object key of the binary |
-| `status` | String | `available`, `deployed`, `failed` |
-| `deployed_timestamp` | String | |
-
-Access pattern: query by `station_id` to get version history.
+```json
+{
+  "station_id": "station_001",
+  "timestamp": "2026-07-09T21:00:00Z",
+  "battery": {
+    "voltage_v": 12.7,
+    "current_a": -5.2,
+    "power_w": -66.0,
+    "soc_percent": 92.5
+  },
+  "pv": {
+    "voltage_v": 19.8,
+    "current_a": 12.4,
+    "power_w": 245.5,
+    "local_irradiance_wm2": 720.0
+  },
+  "environment": {
+    "ambient_temperature_c": 28.4,
+    "relative_humidity_percent": 46.0,
+    "panel_temperature_c": 45.3
+  },
+  "outputs": {
+    "output_1_active": true,
+    "output_2_active": true,
+    "output_3_active": false,
+    "output_1_current_a": 1.62,
+    "output_2_current_a": 1.58,
+    "output_3_current_a": 0.0
+  },
+  "tracking": {
+    "enabled": true,
+    "angle_deg": 28.5,
+    "target_angle_deg": 30.0
+  },
+  "decision": {
+    "weather_index": 0.78,
+    "demand_index": 0.62,
+    "fis_mode": "M4",
+    "requested_mode": "M4",
+    "operating_mode": "M4"
+  },
+  "fault_state": "normal"
+}
+```
 
 ---
 
-## TTL Summary
+## 2. StationStatus Table
 
-| Table | TTL field | Retention |
-|---|---|---|
-| StationTelemetry | `ttl` | 90 days |
-| StationCommands | `ttl` | 30 days |
-| StationFaults | `ttl` | 180 days |
-| StationState | none | permanent (1 item per station) |
-| StationFirmware | none | permanent (small table) |
+### Purpose
+
+Stores the most recent known state of each charging station. Unlike `TelemetryHistory`, this table keeps only the latest status per station.
+
+### Table Name
+
+```text
+StationStatus
+```
+
+### Keys
+
+| Key          | Type          | Description                               |
+| ------------ | ------------- | ----------------------------------------- |
+| `station_id` | Partition key | Unique identifier of the charging station |
+
+### Example Item
+
+```json
+{
+  "station_id": "station_001",
+  "last_update": "2026-07-09T21:00:00Z",
+  "system_state": "AUTO",
+  "fis_mode": "M4",
+  "requested_mode": "M4",
+  "operating_mode": "M4",
+  "outputs_active": 2,
+  "tracking_allowed": true,
+  "charging_allowed": true,
+  "manual_lock": false,
+  "cloud_connected": true,
+  "fault_state": "normal"
+}
+```
 
 ---
 
-## Free Tier estimate
+## 3. FaultEvents Table
 
-At 30-second telemetry intervals from one station:
-- ~2,880 writes/day to StationTelemetry
-- ~86,400 writes/month
-- DynamoDB Free Tier includes 25 WCU and 25 RCU (provisioned) or
-  1 million write request units/month (on-demand).
-- Estimated storage after 90 days with TTL: < 50 MB.
-- **Estimated cost: $0/month within Free Tier.**
+### Purpose
+
+Stores fault events, restrictions, safety lockouts, invalid data conditions, and other diagnostic events.
+
+### Table Name
+
+```text
+FaultEvents
+```
+
+### Keys
+
+| Key          | Type          | Description                               |
+| ------------ | ------------- | ----------------------------------------- |
+| `station_id` | Partition key | Unique identifier of the charging station |
+| `timestamp`  | Sort key      | ISO 8601 timestamp of the fault event     |
+
+### Example Item
+
+```json
+{
+  "station_id": "station_001",
+  "timestamp": "2026-07-09T21:00:00Z",
+  "fault_state": "non_critical_restriction",
+  "fault_code": "LOW_SOC_TRACKING_INHIBIT",
+  "severity": "warning",
+  "description": "Tracking was inhibited because the battery SOC is below the configured threshold.",
+  "affected_functions": {
+    "tracking": true,
+    "charging_outputs": false,
+    "cloud_commands": false
+  },
+  "measurements": {
+    "soc_percent": 84.7,
+    "battery_power_w": -55.0,
+    "local_irradiance_wm2": 390.0
+  }
+}
+```
+
+### Suggested Severity Levels
+
+```text
+info
+warning
+critical
+```
+
+### Suggested Fault States
+
+```text
+normal
+non_critical_restriction
+data_or_sensor_fault
+critical_lockout
+```
+
+---
+
+## 4. CommandLog Table
+
+### Purpose
+
+Stores cloud-generated commands and ESP32 acknowledgements. This table allows the system to verify whether a command was sent, received, accepted, rejected, or blocked by the local safety layer.
+
+### Table Name
+
+```text
+CommandLog
+```
+
+### Keys
+
+| Key          | Type          | Description                               |
+| ------------ | ------------- | ----------------------------------------- |
+| `station_id` | Partition key | Unique identifier of the charging station |
+| `command_id` | Sort key      | Unique identifier of the command          |
+
+### Example Item
+
+```json
+{
+  "station_id": "station_001",
+  "command_id": "cmd-20260709-0001",
+  "created_at": "2026-07-09T21:00:00Z",
+  "command": "ENABLE_OUTPUT_2",
+  "source": "cloud_fis",
+  "parameters": {
+    "requested_mode": "M4",
+    "max_outputs": 2,
+    "tracking_allowed": true
+  },
+  "status": "accepted",
+  "applied": true,
+  "ack_timestamp": "2026-07-09T21:00:02Z",
+  "resulting_operating_mode": "M4",
+  "message": "Command accepted and applied."
+}
+```
+
+### Suggested Command Status Values
+
+```text
+created
+sent
+received
+accepted
+rejected
+blocked_by_safety
+invalid_command
+timeout
+```
+
+---
+
+## 5. DemandProfile Table
+
+### Purpose
+
+Stores the default and adaptive demand table used to estimate the Demand Index. The initial version can use a fixed demand table, while future versions may update the table based on historical charging events.
+
+### Table Name
+
+```text
+DemandProfile
+```
+
+### Keys
+
+| Key          | Type          | Description                               |
+| ------------ | ------------- | ----------------------------------------- |
+| `station_id` | Partition key | Unique identifier of the charging station |
+| `slot_id`    | Sort key      | Time slot identifier                      |
+
+### Slot Format
+
+The demand table can use 48 half-hour slots per day:
+
+```text
+day_{0-6}_slot_{0-47}
+```
+
+Where:
+
+```text
+day_0 = Monday
+day_1 = Tuesday
+day_2 = Wednesday
+day_3 = Thursday
+day_4 = Friday
+day_5 = Saturday
+day_6 = Sunday
+```
+
+### Example Item
+
+```json
+{
+  "station_id": "station_001",
+  "slot_id": "day_0_slot_18",
+  "day": "Monday",
+  "slot_index": 18,
+  "start_time": "09:00",
+  "end_time": "09:30",
+  "default_demand_index": 0.60,
+  "adaptive_demand_index": 0.64,
+  "sample_count": 25,
+  "last_updated": "2026-07-09T21:00:00Z"
+}
+```
+
+---
+
+## 6. BatterySOHHistory Table
+
+### Purpose
+
+Stores battery health indicators estimated from SmartShunt measurements and long-term operating data. The Victron SmartShunt does not directly provide a complete SOH value in the standard telemetry fields, so SOH should be estimated using historical voltage, current, SOC, charge/discharge behavior, and energy throughput.
+
+### Table Name
+
+```text
+BatterySOHHistory
+```
+
+### Keys
+
+| Key          | Type          | Description                               |
+| ------------ | ------------- | ----------------------------------------- |
+| `station_id` | Partition key | Unique identifier of the charging station |
+| `timestamp`  | Sort key      | ISO 8601 timestamp of the SOH estimate    |
+
+### Example Item
+
+```json
+{
+  "station_id": "station_001",
+  "timestamp": "2026-07-09T21:00:00Z",
+  "estimated_soh_percent": 96.5,
+  "soc_percent": 92.5,
+  "battery_voltage_v": 12.7,
+  "battery_current_a": -5.2,
+  "energy_throughput_wh": 15420.0,
+  "cycle_estimate": 18.4,
+  "estimation_method": "energy_throughput_and_soc_trend",
+  "confidence": "low"
+}
+```
+
+---
+
+## 7. ActuatorLifeHistory Table
+
+### Purpose
+
+Stores actuator usage statistics, including movement time, estimated duty cycle, number of movements, and accumulated operating time. This table supports future maintenance estimation.
+
+### Table Name
+
+```text
+ActuatorLifeHistory
+```
+
+### Keys
+
+| Key          | Type          | Description                                     |
+| ------------ | ------------- | ----------------------------------------------- |
+| `station_id` | Partition key | Unique identifier of the charging station       |
+| `timestamp`  | Sort key      | ISO 8601 timestamp of the actuator usage update |
+
+### Example Item
+
+```json
+{
+  "station_id": "station_001",
+  "timestamp": "2026-07-09T21:00:00Z",
+  "actuator_group": "elevation_tracking",
+  "movement_direction": "extend",
+  "movement_time_s": 4.6,
+  "daily_movement_time_s": 126.0,
+  "accumulated_movement_time_s": 48250.0,
+  "movement_count": 12,
+  "estimated_duty_cycle_percent": 18.0,
+  "maintenance_state": "normal"
+}
+```
+
+---
+
+## 8. FISDecisionHistory Table
+
+### Purpose
+
+Stores the fuzzy decision results generated by the cloud backend. This allows the thesis to compare input conditions, fuzzy recommendations, deterministic validation, and final operating modes.
+
+### Table Name
+
+```text
+FISDecisionHistory
+```
+
+### Keys
+
+| Key          | Type          | Description                               |
+| ------------ | ------------- | ----------------------------------------- |
+| `station_id` | Partition key | Unique identifier of the charging station |
+| `timestamp`  | Sort key      | ISO 8601 timestamp of the FIS decision    |
+
+### Example Item
+
+```json
+{
+  "station_id": "station_001",
+  "timestamp": "2026-07-09T21:00:00Z",
+  "inputs": {
+    "soc_percent": 92.5,
+    "p_net_w": 178.0,
+    "local_irradiance_wm2": 720.0,
+    "weather_index": 0.78,
+    "demand_index": 0.62
+  },
+  "weather_fis_output": {
+    "weather_index": 0.78
+  },
+  "main_fis_output": {
+    "fis_mode": "M4"
+  },
+  "deterministic_validation": {
+    "requested_mode": "M4",
+    "tracking_allowed": true,
+    "charging_allowed": true,
+    "blocked_reason": null
+  },
+  "final_decision": {
+    "operating_mode": "M4",
+    "outputs_active": 2
+  }
+}
+```
+
+---
+
+## 9. Initial Table Summary
+
+| Table                 | Main Purpose                        | Partition Key | Sort Key     |
+| --------------------- | ----------------------------------- | ------------- | ------------ |
+| `TelemetryHistory`    | Periodic sensor and energy data     | `station_id`  | `timestamp`  |
+| `StationStatus`       | Latest station state                | `station_id`  | None         |
+| `FaultEvents`         | Fault and restriction history       | `station_id`  | `timestamp`  |
+| `CommandLog`          | Cloud commands and acknowledgements | `station_id`  | `command_id` |
+| `DemandProfile`       | Default and adaptive demand table   | `station_id`  | `slot_id`    |
+| `BatterySOHHistory`   | Estimated battery health history    | `station_id`  | `timestamp`  |
+| `ActuatorLifeHistory` | Actuator usage and lifetime data    | `station_id`  | `timestamp`  |
+| `FISDecisionHistory`  | Cloud FIS decision history          | `station_id`  | `timestamp`  |
+
+---
+
+## 10. Design Notes
+
+The database separates raw telemetry, current station status, faults, commands, and long-term analysis data.
+
+The ESP32 remains responsible for local safety validation. The cloud backend stores data, estimates demand, evaluates fuzzy decision logic, sends command requests, and records whether the ESP32 accepted or rejected those commands.
+
+For the first thesis implementation, the minimum required tables are:
+
+```text
+TelemetryHistory
+StationStatus
+FaultEvents
+CommandLog
+DemandProfile
+FISDecisionHistory
+```
+
+The following tables can be added during the advanced diagnostic stage:
+
+```text
+BatterySOHHistory
+ActuatorLifeHistory
+```
