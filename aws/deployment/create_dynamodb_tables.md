@@ -322,3 +322,50 @@ COMMAND_LOG_TABLE_NAME=CommandLog
 ```
 
 If a table name is changed in AWS, the corresponding Lambda environment variable must also be updated.
+
+## Deployment Status
+
+### Created in AWS region:
+
+```text
+us-east-2
+```
+
+### Created tables:
+
+| Table                | Status  | Partition Key | Sort Key     | Capacity Mode | Table Class       |
+| -------------------- | ------- | ------------- | ------------ | ------------- | ----------------- |
+| `TelemetryHistory`   | Created | `station_id`  | `timestamp`  | On-demand     | DynamoDB Standard |
+| `StationStatus`      | Created | `station_id`  | None         | On-demand     | DynamoDB Standard |
+| `FaultEvents`        | Created | `station_id`  | `timestamp`  | On-demand     | DynamoDB Standard |
+| `CommandLog`         | Created | `station_id`  | `command_id` | On-demand     | DynamoDB Standard |
+| `DemandProfile`      | Created | `station_id`  | `slot_id`    | On-demand     | DynamoDB Standard |
+| `FISDecisionHistory` | Created | `station_id`  | `timestamp`  | On-demand     | DynamoDB Standard |
+
+### Configuration used:
+
+Table class: DynamoDB Standard
+Capacity mode: On-demand
+Secondary indexes: None
+Streams: Disabled
+Point-in-time recovery: Disabled initially
+Deletion protection: Off
+Encryption: AWS owned key
+Resource-based policy: Not active
+
+### Notes
+
+The created table names and key names match the Lambda environment variables and the project documentation.
+
+The default DynamoDB table settings were used because they are appropriate for the initial low-volume thesis prototype.
+
+Optional tables not created yet:
+
+BatterySOHHistory
+ActuatorLifeHistory
+
+These tables will be created later when the SOH estimation and actuator lifetime estimation functions are implemented.
+
+### DEPLOYMENT DATE: 
+2026-07-11
+
