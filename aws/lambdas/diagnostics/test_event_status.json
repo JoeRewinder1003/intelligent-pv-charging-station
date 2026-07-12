@@ -1,0 +1,15 @@
+{
+  "station_id": "station_001",
+  "timestamp": "2026-07-09T21:00:00Z",
+  "message_type": "status",
+  "system_state": "AUTO",
+  "fis_mode": "M4",
+  "requested_mode": "M4",
+  "operating_mode": "M4",
+  "outputs_active": 2,
+  "tracking_allowed": true,
+  "charging_allowed": true,
+  "manual_lock": false,
+  "cloud_connected": true,
+  "fault_state": "normal"
+}

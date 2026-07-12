@@ -1,0 +1,19 @@
+{
+  "station_id": "station_001",
+  "timestamp": "2026-07-09T21:00:00Z",
+  "message_type": "faults",
+  "fault_state": "non_critical_restriction",
+  "fault_code": "LOW_SOC_TRACKING_INHIBIT",
+  "severity": "warning",
+  "description": "Tracking was inhibited because the battery SOC is below the configured threshold.",
+  "affected_functions": {
+    "tracking": true,
+    "charging_outputs": false,
+    "cloud_commands": false
+  },
+  "measurements": {
+    "soc_percent": 84.7,
+    "battery_power_w": -55.0,
+    "local_irradiance_wm2": 390.0
+  }
+}

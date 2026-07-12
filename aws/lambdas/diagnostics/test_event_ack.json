@@ -1,0 +1,11 @@
+{
+  "station_id": "station_001",
+  "timestamp": "2026-07-09T21:00:02Z",
+  "message_type": "acks",
+  "command_id": "cmd-20260709-0001",
+  "command": "ENABLE_OUTPUT_2",
+  "status": "accepted",
+  "applied": true,
+  "resulting_operating_mode": "M4",
+  "message": "Command accepted and applied."
+}
