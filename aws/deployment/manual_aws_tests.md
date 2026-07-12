@@ -506,3 +506,41 @@ The command_dispatcher Lambda function was tested manually from the AWS Lambda c
 The command_dispatcher infrastructure flow was successfully validated:
 
 Lambda → DynamoDB CommandLog → AWS IoT Core MQTT
+
+
+---
+
+
+## diagnostics
+
+The diagnostics Lambda function was tested manually from the AWS Lambda console.
+
+### Verified status event
+
+- The Lambda returned a successful response.
+- The station record was written to StationStatus.
+- The operating mode and fault state were stored correctly.
+
+### Verified fault event
+
+- The Lambda returned a successful response.
+- A fault record was written to FaultEvents.
+- StationStatus was updated with the latest fault information.
+
+### Verified acknowledgement event
+
+- The Lambda returned a successful response.
+- The existing command record in CommandLog was updated.
+- The acknowledgement status, application result, timestamp, and resulting operating mode were stored.
+
+### CloudWatch
+
+All three invocations were registered successfully in Amazon CloudWatch Logs.
+
+### Result
+
+The diagnostics DynamoDB flow was successfully validated for:
+
+- Status messages
+- Fault messages
+- Command acknowledgements

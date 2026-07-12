@@ -595,3 +595,23 @@ us-east-2
 
 - dynamodb:PutItem on CommandLog
 - iot:Publish on `station/*/commands`
+
+
+---
+
+
+## lambda_diagnostics_role
+
+### Managed policy
+
+- AWSLambdaBasicExecutionRole
+
+### Inline policy
+
+- diagnostics_dynamodb_policy
+
+### Permissions
+
+- dynamodb:PutItem on FaultEvents
+- dynamodb:UpdateItem on CommandLog
+- dynamodb:PutItem and dynamodb:UpdateItem on StationStatus

@@ -409,3 +409,33 @@ ESP32 deterministic layer = final authorization
 Commands are published to:
 
 `station/{station_id}/commands`
+
+
+---
+
+
+## diagnostics
+
+### AWS configuration
+
+- Region: us-east-2
+- Function name: diagnostics
+- Runtime: Python 3.13
+- Architecture: x86_64
+- Handler: lambda_function.lambda_handler
+- Execution role: lambda_diagnostics_role
+- Memory: 128 MB
+- Timeout: 10 seconds
+
+### Environment variables
+
+- FAULT_EVENTS_TABLE_NAME=FaultEvents
+- COMMAND_LOG_TABLE_NAME=CommandLog
+- STATUS_TABLE_NAME=StationStatus
+
+### Source files
+
+- Lambda code: aws/lambdas/diagnostics/lambda_function.py
+- Status test: aws/lambdas/diagnostics/test_event_status.json
+- Fault test: aws/lambdas/diagnostics/test_event_fault.json
+- Acknowledgement test: aws/lambdas/diagnostics/test_event_ack.json
