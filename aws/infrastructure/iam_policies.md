@@ -580,3 +580,18 @@ us-east-2
 | `TelemetryHistory` | `dynamodb:PutItem`                        |
 | `StationStatus`    | `dynamodb:PutItem`, `dynamodb:UpdateItem` |
 
+
+## lambda_command_dispatcher_role
+
+### Managed policy
+
+- AWSLambdaBasicExecutionRole
+
+### Inline policy
+
+- command_dispatcher_dynamodb_iot_policy
+
+### Permissions
+
+- dynamodb:PutItem on CommandLog
+- iot:Publish on `station/*/commands`

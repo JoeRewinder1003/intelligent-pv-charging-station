@@ -375,3 +375,37 @@ ESP32 deterministic layer = final authorization
 
 - Lambda code: aws/lambdas/telemetry_processor/lambda_function.py
 - Test event: aws/lambdas/telemetry_processor/test_event.json
+
+
+---
+
+
+## command_dispatcher
+
+### AWS configuration
+
+- Region: us-east-2
+- Function name: command_dispatcher
+- Runtime: Python 3.13
+- Architecture: x86_64
+- Handler: lambda_function.lambda_handler
+- Execution role: lambda_command_dispatcher_role
+- Memory: 128 MB
+- Timeout: 10 seconds
+
+### Environment variables
+
+- COMMAND_LOG_TABLE_NAME=CommandLog
+- AWS_IOT_DATA_ENDPOINT= <AWS IoT Data-ATS endpoint>
+
+
+### Source files
+
+- Lambda code: aws/lambdas/command_dispatcher/lambda_function.py
+- Test event: aws/lambdas/command_dispatcher/test_event.json
+
+### MQTT topic
+
+Commands are published to:
+
+`station/{station_id}/commands`

@@ -478,3 +478,31 @@ The telemetry_processor Lambda function was tested manually from the AWS Lambda 
 ### Test event
 
 aws/lambdas/telemetry_processor/test_event.json
+
+---
+
+
+## command_dispatcher
+
+The command_dispatcher Lambda function was tested manually from the AWS Lambda console.
+
+### Test event
+
+- File: aws/lambdas/command_dispatcher/test_event.json
+- Station ID: station_001
+- Command: ENABLE_OUTPUT_2
+- Source: cloud_fis
+
+### Verified results
+
+- The Lambda returned a successful response.
+- A new command record was stored in the CommandLog DynamoDB table.
+- The MQTT message was received through the AWS IoT Core MQTT test client.
+- The message was published to `station/station_001/commands`.
+- The invocation was registered in Amazon CloudWatch Logs.
+
+### Result
+
+The command_dispatcher infrastructure flow was successfully validated:
+
+Lambda → DynamoDB CommandLog → AWS IoT Core MQTT
