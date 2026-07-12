@@ -356,3 +356,22 @@ Cloud FIS = recommendation
 Command Dispatcher = MQTT command request
 ESP32 deterministic layer = final authorization
 ```
+
+## telemetry_processor
+
+- Region: us-east-2
+- Function name: telemetry_processor
+- Runtime: Python 3.13
+- Architecture: x86_64
+- Handler: lambda_function.lambda_handler
+- Execution role: lambda_telemetry_processor_role
+
+### Environment variables
+
+- TELEMETRY_TABLE_NAME=TelemetryHistory
+- STATUS_TABLE_NAME=StationStatus
+
+### Source files
+
+- Lambda code: aws/lambdas/telemetry_processor/lambda_function.py
+- Test event: aws/lambdas/telemetry_processor/test_event.json
