@@ -544,3 +544,24 @@ The diagnostics DynamoDB flow was successfully validated for:
 - Status messages
 - Fault messages
 - Command acknowledgements
+
+
+---
+
+
+## AWS IoT Core Rule Integration Tests
+
+The four AWS IoT Core rules were tested using the MQTT test client.
+
+### Verified results
+
+- Telemetry messages invoked `telemetry_processor`.
+- Telemetry records were stored in `TelemetryHistory`.
+- Status messages invoked `diagnostics` and updated `StationStatus`.
+- Fault messages created records in `FaultEvents` and updated `StationStatus`.
+- Acknowledgement messages updated existing records in `CommandLog`.
+- All invocations were registered in Amazon CloudWatch Logs.
+
+### Result
+
+The MQTT-to-Lambda-to-DynamoDB flow was successfully validated.

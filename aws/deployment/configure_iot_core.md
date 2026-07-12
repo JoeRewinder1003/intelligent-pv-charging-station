@@ -168,7 +168,7 @@ Replace the following values before using the policy:
 Example region:
 
 ```text
-us-east-1
+us-east-2
 ```
 
 ---
@@ -338,3 +338,19 @@ ESP32 deterministic layer = final physical authorization
 ```
 
 Cloud-generated commands must never bypass the local safety logic of the ESP32.
+
+---
+
+
+## Created IoT Rules
+
+The following AWS IoT Core rules were created in region `us-east-2`:
+
+| Rule | MQTT topic filter | Target Lambda |
+|---|---|---|
+| `station_telemetry_to_lambda` | `station/+/telemetry` | `telemetry_processor` |
+| `station_status_to_lambda` | `station/+/status` | `diagnostics` |
+| `station_faults_to_lambda` | `station/+/faults` | `diagnostics` |
+| `station_acks_to_lambda` | `station/+/acks` | `diagnostics` |
+
+The optional combined diagnostics rule was not created to avoid duplicate Lambda invocations.
