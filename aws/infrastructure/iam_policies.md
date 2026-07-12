@@ -549,3 +549,34 @@ Therefore:
 Cloud permission = request and process
 ESP32 local logic = validate and authorize physical action
 ```
+
+---
+
+## Deployment Status
+
+The first IAM role was created manually in AWS.
+
+### AWS Region
+
+```text
+us-east-2
+```
+
+### Created roles
+
+| Role                              | Status  | Purpose                                                                                       |
+| --------------------------------- | ------- | --------------------------------------------------------------------------------------------- |
+| `lambda_telemetry_processor_role` | Created | Allows `telemetry_processor` to write telemetry data to DynamoDB and write logs to CloudWatch |
+
+### Attatched permissions
+| Role                              | Permission                                           |
+| --------------------------------- | ---------------------------------------------------- |
+| `lambda_telemetry_processor_role` | `AWSLambdaBasicExecutionRole`                        |
+| `lambda_telemetry_processor_role` | Inline policy: `telemetry_processor_dynamodb_policy` |
+
+### DynamoDB Access
+| Table              | Permissions                               |
+| ------------------ | ----------------------------------------- |
+| `TelemetryHistory` | `dynamodb:PutItem`                        |
+| `StationStatus`    | `dynamodb:PutItem`, `dynamodb:UpdateItem` |
+
