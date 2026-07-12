@@ -1,0 +1,25 @@
+{
+  "station_id": "station_001",
+  "timestamp": "2026-07-09T21:00:00Z",
+  "battery": {
+    "voltage_v": 12.9,
+    "current_a": 13.8,
+    "power_w": 178.0,
+    "soc_percent": 94.0
+  },
+  "pv": {
+    "voltage_v": 19.8,
+    "current_a": 12.4,
+    "power_w": 245.5,
+    "local_irradiance_wm2": 720.0
+  },
+  "weather": {
+    "shortwave_radiation_wm2": 760.0,
+    "cloud_cover_percent": 18.0,
+    "precipitation_probability_percent": 5.0
+  },
+  "decision": {
+    "demand_index": 0.72
+  },
+  "fault_state": "normal"
+}
