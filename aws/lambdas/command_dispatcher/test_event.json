@@ -1,0 +1,10 @@
+{
+  "station_id": "station_001",
+  "command": "ENABLE_OUTPUT_2",
+  "source": "cloud_fis",
+  "parameters": {
+    "requested_mode": "M4",
+    "max_outputs": 2,
+    "tracking_allowed": true
+  }
+}
