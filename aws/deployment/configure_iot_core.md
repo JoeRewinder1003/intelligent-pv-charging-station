@@ -354,3 +354,15 @@ The following AWS IoT Core rules were created in region `us-east-2`:
 | `station_acks_to_lambda` | `station/+/acks` | `diagnostics` |
 
 The optional combined diagnostics rule was not created to avoid duplicate Lambda invocations.
+## Certificate Validation
+
+The certificate and IoT policy assigned to `station_001` were successfully validated using an external MQTT client.
+
+The following permissions were confirmed:
+
+- `iot:Connect`
+- `iot:Publish`
+- `iot:Subscribe`
+- `iot:Receive`
+
+Both telemetry publishing and command reception were tested successfully using QoS 1.

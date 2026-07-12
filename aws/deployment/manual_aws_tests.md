@@ -565,3 +565,45 @@ The four AWS IoT Core rules were tested using the MQTT test client.
 ### Result
 
 The MQTT-to-Lambda-to-DynamoDB flow was successfully validated.
+
+## Device Certificate MQTT Integration Test
+
+The AWS IoT certificate created for `station_001` was tested from a local PC using Eclipse Mosquitto.
+
+### ESP32-to-AWS simulation
+
+The authenticated MQTT client published a telemetry message to:
+
+`station/station_001/telemetry`
+
+The following results were verified:
+
+- AWS IoT Core accepted the TLS/MQTT connection.
+- The message was published using QoS 1.
+- The `station_telemetry_to_lambda` rule invoked `telemetry_processor`.
+- Telemetry data was processed and stored in DynamoDB.
+
+### AWS-to-device simulation
+
+The authenticated MQTT client subscribed to:
+
+`station/station_001/commands`
+
+The `command_dispatcher` Lambda published a test command, and the client successfully received and acknowledged the MQTT message using QoS 1.
+
+### Verified command
+
+- Station ID: `station_001`
+- Command: `ENABLE_OUTPUT_2`
+- Requested mode: `M4`
+- Maximum outputs: `2`
+- Tracking allowed: `true`
+
+### Result
+
+Bidirectional MQTT communication was successfully validated:
+
+- Device certificate client → AWS IoT Core
+- AWS IoT Core → Lambda and DynamoDB
+- Command Dispatcher Lambda → AWS IoT Core
+- AWS IoT Core → authenticated device client
