@@ -607,3 +607,40 @@ Bidirectional MQTT communication was successfully validated:
 - AWS IoT Core → Lambda and DynamoDB
 - Command Dispatcher Lambda → AWS IoT Core
 - AWS IoT Core → authenticated device client
+
+---
+
+
+## ESP32 Telemetry Integration Test
+
+The ESP32 was connected to AWS IoT Core using its device certificate and private key.
+
+### Verified flow
+
+`ESP32 → AWS IoT Core → telemetry_processor → DynamoDB`
+
+### Results
+
+- Wi-Fi and TLS connections were established successfully.
+- The ESP32 connected using the MQTT client ID `station_001`.
+- Telemetry messages were published to `station/station_001/telemetry`.
+- UTC timestamps were generated using NTP.
+- The AWS IoT rule invoked `telemetry_processor`.
+- Multiple records with unique timestamps were stored in `TelemetryHistory`.
+- The latest station state was updated in `StationStatus`.
+
+The telemetry and decision values used in this test were fixed connectivity-test values and do not represent final measured data or the final fuzzy inference system.
+
+---
+
+## ESP32 Command Reception Test
+
+The `command_dispatcher` Lambda published a command to:
+
+`station/station_001/commands`
+
+The ESP32 received and displayed the command through the serial monitor. No physical outputs, relays, charging channels, or actuators were activated.
+
+This test validated:
+
+`command_dispatcher → AWS IoT Core → ESP32`
