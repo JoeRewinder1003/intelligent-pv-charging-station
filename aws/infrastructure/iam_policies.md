@@ -615,3 +615,18 @@ us-east-2
 - dynamodb:PutItem on FaultEvents
 - dynamodb:UpdateItem on CommandLog
 - dynamodb:PutItem and dynamodb:UpdateItem on StationStatus
+
+---
+
+## lambda_fis_processor_role
+
+### Managed policy
+
+- AWSLambdaBasicExecutionRole
+
+### Inline policies
+
+None currently required.
+
+The preliminary fis_processor implementation does not yet access
+DynamoDB or AWS IoT Core.

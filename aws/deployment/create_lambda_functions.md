@@ -458,4 +458,36 @@ Commands are initially stored in `CommandLog` with status `pending`.
 - Acknowledgement test: aws/lambdas/diagnostics/test_event_ack.json
 
 
-}}
+---
+
+
+## fis_processor
+
+### AWS configuration
+
+- Region: us-east-2
+- Function name: fis_processor
+- Runtime: Python 3.13
+- Architecture: x86_64
+- Handler: lambda_function.lambda_handler
+- Execution role: lambda_fis_processor_role
+- Memory: 128 MB
+- Timeout: 10 seconds
+
+### Environment variables
+
+No environment variables are currently required.
+
+### Source files
+
+- Lambda code: aws/lambdas/fis_processor/lambda_function.py
+- Test event: aws/lambdas/fis_processor/test_event.json
+
+### Current scope
+
+The function evaluates a preliminary cloud-side Weather FIS and Main FIS
+and returns a command request. It does not yet store decisions in
+FISDecisionHistory or invoke command_dispatcher.
+
+The current FIS implementation is preliminary and must still be aligned
+with the final ESP32/article FIS definition.

@@ -428,19 +428,26 @@ def trimf(x: float, a: float, b: float, c: float) -> float:
     return 0.0
 
 
-def trapmf(x: float, a: float, b: float, c: float, d: float) -> float:
-    if x <= a or x >= d:
+def trapmf( x: float, a: float, b: float, c: float, d: float,) -> float:
+    
+    if x < a or x > d:
         return 0.0
+
     if b <= x <= c:
         return 1.0
-    if a < x < b:
+
+    if a <= x < b:
         if b == a:
             return 1.0
+
         return (x - a) / (b - a)
-    if c < x < d:
+
+    if c < x <= d:
         if d == c:
             return 1.0
+
         return (d - x) / (d - c)
+
     return 0.0
 
 

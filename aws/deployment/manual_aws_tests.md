@@ -805,3 +805,25 @@ The command lifecycle was tested with the real ESP32 connected to AWS IoT Core.
 The complete cloud-to-device and device-to-cloud command lifecycle was
 successfully validated while preserving local ESP32 authority over physical
 actions.
+
+---
+
+## Preliminary fis_processor Lambda Test
+
+The preliminary fis_processor Lambda was tested manually from the AWS
+Lambda console.
+
+### Verified results
+
+- The standard test event returned status code `200`.
+- The Weather FIS generated a Weather Index.
+- The Main FIS generated an operating-mode recommendation.
+- A cloud-side deterministic validation result was produced.
+- A command request was returned without publishing it to AWS IoT Core.
+- A critical-lockout event produced an `M0` and `LOCKOUT` request.
+
+### Scope limitation
+
+This test validates the Lambda infrastructure and the general processing
+flow. The fuzzy inference implementation is preliminary and does not yet
+represent the definitive FIS from the article and ESP32 implementation.
