@@ -275,26 +275,61 @@ def update_command_acknowledgement(payload: Dict[str, Any]) -> None:
 
 
 def update_station_status(payload: Dict[str, Any]) -> None:
+    """
+    Partially updates StationStatus without deleting telemetry
+    or fault attributes written by other message flows.
+    """
+
     dynamodb = boto3.resource("dynamodb")
     table = dynamodb.Table(STATUS_TABLE_NAME)
 
-    item = {
-        "station_id": payload["station_id"],
+    updates: Dict[str, Any] = {
         "last_update": payload["timestamp"],
-        "system_state": payload.get("system_state"),
-        "fis_mode": payload.get("fis_mode"),
-        "requested_mode": payload.get("requested_mode"),
-        "operating_mode": payload.get("operating_mode"),
-        "outputs_active": payload.get("outputs_active"),
-        "tracking_allowed": payload.get("tracking_allowed"),
-        "charging_allowed": payload.get("charging_allowed"),
-        "manual_lock": payload.get("manual_lock"),
-        "cloud_connected": payload.get("cloud_connected"),
-        "fault_state": payload.get("fault_state"),
+        "operating_mode": payload["operating_mode"],
+        "fault_state": payload["fault_state"],
         "updated_at": current_utc_timestamp(),
     }
 
-    table.put_item(Item=convert_floats_to_decimal(item))
+    optional_fields = [
+        "system_state",
+        "fis_mode",
+        "requested_mode",
+        "outputs_active",
+        "tracking_allowed",
+        "charging_allowed",
+        "manual_lock",
+        "cloud_connected",
+    ]
+
+    for field in optional_fields:
+        if field in payload:
+            updates[field] = payload[field]
+
+    expression_names: Dict[str, str] = {}
+    expression_values: Dict[str, Any] = {}
+    set_expressions = []
+
+    for index, (field, value) in enumerate(updates.items()):
+        name_placeholder = f"#field_{index}"
+        value_placeholder = f":value_{index}"
+
+        expression_names[name_placeholder] = field
+        expression_values[value_placeholder] = value
+
+        set_expressions.append(
+            f"{name_placeholder} = {value_placeholder}"
+        )
+
+    table.update_item(
+        Key={
+            "station_id": payload["station_id"],
+        },
+        UpdateExpression="SET " + ", ".join(set_expressions),
+        ExpressionAttributeNames=expression_names,
+        ExpressionAttributeValues=convert_floats_to_decimal(
+            expression_values
+        ),
+    )
 
 
 def update_station_status_from_fault(payload: Dict[str, Any]) -> None:

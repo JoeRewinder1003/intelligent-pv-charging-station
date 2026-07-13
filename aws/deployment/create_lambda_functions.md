@@ -91,6 +91,10 @@ Expected result:
 Telemetry processed successfully
 ```
 
+### Notes
+`StationStatus` is updated using `UpdateItem` to preserve attributes
+written by other Lambda functions.
+
 ---
 
 ## 2. diagnostics
@@ -145,6 +149,10 @@ Expected result:
 ```text
 Diagnostics message processed successfully
 ```
+
+### Notes
+`StationStatus` is updated using `UpdateItem` to preserve attributes
+written by other Lambda functions.
 
 ---
 

@@ -61,8 +61,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         telemetry_table.put_item(Item=item)
 
-        station_status_item = build_station_status_item(payload)
-        status_table.put_item(Item=convert_floats_to_decimal(station_status_item))
+        update_station_status(payload)
 
         return response(
             status_code=200,
@@ -181,30 +180,78 @@ def is_valid_utc_timestamp(value: Any) -> bool:
         return False
 
 
-def build_station_status_item(payload: Dict[str, Any]) -> Dict[str, Any]:
+def update_station_status(payload: Dict[str, Any]) -> None:
+    """
+    Partially updates the latest station state without deleting
+    attributes written by other Lambda functions.
+    """
+
     decision = payload.get("decision", {})
     outputs = payload.get("outputs", {})
     tracking = payload.get("tracking", {})
 
-    outputs_active = sum(
-        [
-            bool(outputs.get("output_1_active", False)),
-            bool(outputs.get("output_2_active", False)),
-            bool(outputs.get("output_3_active", False)),
-        ]
+    updates: Dict[str, Any] = {
+        "last_update": payload["timestamp"],
+        "operating_mode": decision["operating_mode"],
+        "fault_state": payload["fault_state"],
+        "updated_at": datetime.now(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z"),
+    }
+
+    if "fis_mode" in decision:
+        updates["fis_mode"] = decision["fis_mode"]
+
+    if "requested_mode" in decision:
+        updates["requested_mode"] = decision["requested_mode"]
+
+    if "outputs" in payload:
+        updates["outputs_active"] = sum(
+            [
+                bool(outputs.get("output_1_active", False)),
+                bool(outputs.get("output_2_active", False)),
+                bool(outputs.get("output_3_active", False)),
+            ]
+        )
+
+    if "enabled" in tracking:
+        updates["tracking_allowed"] = bool(tracking["enabled"])
+
+    update_station_status_fields(
+        station_id=payload["station_id"],
+        updates=updates,
     )
 
-    return {
-        "station_id": payload["station_id"],
-        "last_update": payload["timestamp"],
-        "fis_mode": decision.get("fis_mode"),
-        "requested_mode": decision.get("requested_mode"),
-        "operating_mode": decision.get("operating_mode"),
-        "outputs_active": outputs_active,
-        "tracking_allowed": bool(tracking.get("enabled", False)),
-        "fault_state": payload.get("fault_state", "unknown"),
-        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    }
+
+def update_station_status_fields(
+    station_id: str,
+    updates: Dict[str, Any],
+) -> None:
+    expression_names: Dict[str, str] = {}
+    expression_values: Dict[str, Any] = {}
+    set_expressions = []
+
+    for index, (field, value) in enumerate(updates.items()):
+        name_placeholder = f"#field_{index}"
+        value_placeholder = f":value_{index}"
+
+        expression_names[name_placeholder] = field
+        expression_values[value_placeholder] = value
+
+        set_expressions.append(
+            f"{name_placeholder} = {value_placeholder}"
+        )
+
+    status_table.update_item(
+        Key={
+            "station_id": station_id,
+        },
+        UpdateExpression="SET " + ", ".join(set_expressions),
+        ExpressionAttributeNames=expression_names,
+        ExpressionAttributeValues=convert_floats_to_decimal(
+            expression_values
+        ),
+    )
 
 
 def convert_floats_to_decimal(data: Any) -> Any:

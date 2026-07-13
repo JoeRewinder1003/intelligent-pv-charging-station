@@ -690,3 +690,86 @@ The diagnostics Lambda was updated to reject acknowledgements that reference non
 - No orphan or incomplete item was created in `CommandLog`.
 - An acknowledgement using an existing `command_id` returned status code `200`.
 - The existing command record was updated correctly.
+
+
+---
+
+
+## ESP32 Local Command Validation Tests
+
+The ESP32 connectivity firmware was extended with a simulated local
+command-validation layer. No physical outputs, relays, charging channels,
+tracking mechanisms, or actuators were controlled during these tests.
+
+### Accepted command
+
+The `ENABLE_OUTPUT_2` command was tested while the simulated safety
+lockout was disabled.
+
+Verified result:
+
+- ACK status: `accepted`
+- Applied: `false`
+- Resulting operating mode: `M4`
+- The existing `CommandLog` record was updated successfully.
+- No physical action was executed.
+
+### Command blocked by safety
+
+The simulated critical lockout was enabled using:
+
+`SAFETY ON`
+
+The `ENABLE_OUTPUT_2` command was tested again.
+
+Verified result:
+
+- ACK status: `blocked_by_safety`
+- Applied: `false`
+- Resulting operating mode: `M0`
+- Telemetry reported `fault_state` as `critical_lockout`.
+- No physical action was executed.
+
+### Invalid command
+
+The `OPEN_DOOR` command was published directly to the command MQTT topic.
+
+Verified result:
+
+- ACK status: `invalid_command`
+- Applied: `false`
+- The ACK was visible on `station/station_001/acks`.
+- No orphan record was created in `CommandLog`.
+- No physical action was executed.
+
+### Result
+
+The following safe command-classification flow was validated:
+
+`AWS IoT Core → ESP32 local validation → ACK → diagnostics → CommandLog`
+
+The ESP32 local layer retained final authority and did not apply any
+cloud-generated physical action.
+
+
+---
+
+
+## StationStatus Partial Update Validation
+
+The `telemetry_processor` and `diagnostics` Lambda functions were updated
+to use partial DynamoDB updates for `StationStatus`.
+
+### Verified results
+
+- Telemetry updates no longer replace attributes written by diagnostics.
+- Status updates no longer replace telemetry or fault attributes.
+- `last_fault_code` and `last_fault_severity` remained present after new
+  telemetry messages were processed.
+- Status, operating-mode, connectivity, and fault information coexist in
+  the same `station_001` record.
+
+### Result
+
+Multiple cloud flows can now update `StationStatus` without replacing the
+complete station record.
