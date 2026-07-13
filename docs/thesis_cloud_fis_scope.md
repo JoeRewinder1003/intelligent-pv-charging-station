@@ -353,3 +353,22 @@ The next design block should resolve only the core FIS reference:
 
 SOH, actuator-life estimation, adaptive demand, and OTA should remain
 separate until their data paths and physical validation are available.
+
+---
+
+## 16. Maintenance monitoring role
+
+Battery SOH and actuator-life indicators will not initially be direct
+inputs of the Main FIS.
+
+Their primary purpose is to support maintenance planning and notify the
+technical operator when inspection, maintenance, or component replacement
+may be advisable.
+
+### Maintenance states
+
+```text
+normal
+monitor
+maintenance_due
+replacement_recommended
