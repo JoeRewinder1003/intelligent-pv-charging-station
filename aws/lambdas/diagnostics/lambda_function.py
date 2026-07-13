@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List
+from botocore.exceptions import ClientError
 
 import boto3
 
@@ -14,6 +15,8 @@ STATUS_TABLE_NAME = os.environ.get("STATUS_TABLE_NAME", "StationStatus")
 
 VALID_MESSAGE_TYPES = {"status", "faults", "acks"}
 
+class CommandNotFoundError(Exception):
+    """Raised when an ACK references a command that does not exist."""
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
@@ -69,7 +72,15 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "timestamp": payload.get("timestamp"),
             },
         )
-
+    except CommandNotFoundError as exc:
+        return response(
+            status_code=404,
+            body={
+                "message": "Command acknowledgement could not be applied",
+                "error": str(exc),
+            },
+        )
+    
     except Exception as exc:
         return response(
             status_code=500,
@@ -216,32 +227,51 @@ def update_command_acknowledgement(payload: Dict[str, Any]) -> None:
     dynamodb = boto3.resource("dynamodb")
     table = dynamodb.Table(COMMAND_LOG_TABLE_NAME)
 
-    table.update_item(
-        Key={
-            "station_id": payload["station_id"],
-            "command_id": payload["command_id"],
-        },
-        UpdateExpression=(
-            "SET #status = :status, "
-            "applied = :applied, "
-            "ack_timestamp = :ack_timestamp, "
-            "resulting_operating_mode = :resulting_operating_mode, "
-            "#message = :message"
-        ),
-        ExpressionAttributeNames={
-            "#status": "status",
-            "#message": "message",
-        },
-        ExpressionAttributeValues=convert_floats_to_decimal(
-            {
-                ":status": payload["status"],
-                ":applied": bool(payload.get("applied", False)),
-                ":ack_timestamp": payload["timestamp"],
-                ":resulting_operating_mode": payload.get("resulting_operating_mode"),
-                ":message": payload.get("message", ""),
-            }
-        ),
-    )
+    try:
+        table.update_item(
+            Key={
+                "station_id": payload["station_id"],
+                "command_id": payload["command_id"],
+            },
+            UpdateExpression=(
+                "SET #status = :status, "
+                "applied = :applied, "
+                "ack_timestamp = :ack_timestamp, "
+                "resulting_operating_mode = :resulting_operating_mode, "
+                "#message = :message"
+            ),
+            ConditionExpression=(
+                "attribute_exists(station_id) "
+                "AND attribute_exists(command_id)"
+            ),
+            ExpressionAttributeNames={
+                "#status": "status",
+                "#message": "message",
+            },
+            ExpressionAttributeValues=convert_floats_to_decimal(
+                {
+                    ":status": payload["status"],
+                    ":applied": bool(payload.get("applied", False)),
+                    ":ack_timestamp": payload["timestamp"],
+                    ":resulting_operating_mode": payload.get(
+                        "resulting_operating_mode"
+                    ),
+                    ":message": payload.get("message", ""),
+                }
+            ),
+        )
+
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "")
+
+        if error_code == "ConditionalCheckFailedException":
+            raise CommandNotFoundError(
+                "No existing CommandLog item matches "
+                f"station_id={payload['station_id']} and "
+                f"command_id={payload['command_id']}"
+            ) from exc
+
+        raise
 
 
 def update_station_status(payload: Dict[str, Any]) -> None:
