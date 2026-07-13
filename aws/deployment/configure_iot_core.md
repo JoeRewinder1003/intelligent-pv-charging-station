@@ -366,3 +366,20 @@ The following permissions were confirmed:
 - `iot:Receive`
 
 Both telemetry publishing and command reception were tested successfully using QoS 1.
+
+---
+
+## Preliminary FIS Evaluation Rule
+
+A test-only IoT rule was created:
+
+- Rule: `station_telemetry_to_preliminary_fis`
+- Topic: `station/+/telemetry`
+- Target: `fis_processor`
+- Filter: `source = 'esp32_local_command_validation_test'`
+
+The rule was used only to validate automatic telemetry-to-FIS processing.
+It does not invoke `command_dispatcher` or publish MQTT commands.
+
+The rule was disabled after testing because the current FIS implementation
+remains preliminary.

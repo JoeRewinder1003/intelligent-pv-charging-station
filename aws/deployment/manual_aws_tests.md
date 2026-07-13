@@ -844,3 +844,26 @@ persistence enabled.
 
 The stored FIS decisions are marked as preliminary and must still be
 aligned with the final article and ESP32 FIS implementation.
+
+---
+
+## Automatic Preliminary FIS Invocation Test
+
+ESP32 test telemetry was routed automatically to the preliminary
+`fis_processor` Lambda.
+
+### Verified results
+
+- ESP32 telemetry continued to be stored in `TelemetryHistory`.
+- The same telemetry independently invoked `fis_processor`.
+- FIS evaluations were stored in `FISDecisionHistory`.
+- A normal event generated a preliminary operating-mode recommendation.
+- A critical-lockout event generated an `M0` and `LOCKOUT` recommendation.
+- No new command was created in `CommandLog`.
+- No MQTT command was published to the ESP32.
+- The test-only IoT rule was disabled after validation.
+
+### Scope limitation
+
+The rule validates cloud infrastructure only. The current FIS remains
+preliminary and must be aligned with the final article and ESP32 FIS.

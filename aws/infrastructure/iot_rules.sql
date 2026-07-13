@@ -102,6 +102,28 @@ WHERE
 
 
 -- ============================================================
+-- Preliminary FIS Evaluation Rule
+-- Rule name: station_telemetry_to_preliminary_fis
+-- Topic filter: station/+/telemetry
+-- Target Lambda: fis_processor
+-- Status after validation: Disabled
+-- Purpose:
+--   Routes connectivity-test telemetry to the preliminary cloud
+--   FIS for infrastructure validation. It does not publish
+--   commands to the ESP32.
+-- ============================================================
+
+SELECT
+  *,
+  topic(2) AS station_id_from_topic,
+  topic() AS mqtt_topic,
+  timestamp() AS received_at_epoch_ms
+FROM
+  'station/+/telemetry'
+WHERE
+  source = 'esp32_local_command_validation_test';
+
+-- ============================================================
 -- Command Direction
 -- ============================================================
 -- Commands are not received from the ESP32.
