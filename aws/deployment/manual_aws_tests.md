@@ -644,3 +644,49 @@ The ESP32 received and displayed the command through the serial monitor. No phys
 This test validated:
 
 `command_dispatcher → AWS IoT Core → ESP32`
+
+
+---
+
+
+## ESP32 Command Acknowledgement Integration Test
+
+The ESP32 received a cloud-generated command from:
+
+`station/station_001/commands`
+
+The command JSON was parsed successfully, and the ESP32 published an acknowledgement to:
+
+`station/station_001/acks`
+
+### Verified results
+
+- The command was received using the authenticated AWS IoT connection.
+- The `station_id`, `command_id`, and `command` fields were parsed.
+- No relay, charging output, or actuator was activated.
+- An acknowledgement with status `received` was published.
+- The `station_acks_to_lambda` rule invoked `diagnostics`.
+- The existing record in `CommandLog` was updated.
+- The command status changed from `sent` to `received`.
+- The `applied` field remained `false`.
+
+### Result
+
+The following bidirectional flow was successfully validated:
+
+`command_dispatcher → AWS IoT Core → ESP32 → diagnostics → CommandLog`
+
+
+---
+
+
+## Command Acknowledgement Existence Validation
+
+The diagnostics Lambda was updated to reject acknowledgements that reference nonexistent command records.
+
+### Verified results
+
+- An acknowledgement with a nonexistent `command_id` returned status code `404`.
+- No orphan or incomplete item was created in `CommandLog`.
+- An acknowledgement using an existing `command_id` returned status code `200`.
+- The existing command record was updated correctly.
