@@ -5,27 +5,25 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-
 TESTS = [
     {
-        "name": "telemetry_processor local test",
-        "cwd": PROJECT_ROOT / "aws" / "lambdas" / "telemetry_processor",
-        "command": [sys.executable, "local_test.py"],
-    },
-    {
-        "name": "command_dispatcher local test",
-        "cwd": PROJECT_ROOT / "aws" / "lambdas" / "command_dispatcher",
-        "command": [sys.executable, "local_test.py"],
-    },
-    {
-        "name": "diagnostics local test",
-        "cwd": PROJECT_ROOT / "aws" / "lambdas" / "diagnostics",
-        "command": [sys.executable, "local_test.py"],
+        "name": "cloud backend unit tests",
+        "cwd": PROJECT_ROOT,
+        "command": [
+            sys.executable,
+            "-m",
+            "unittest",
+            "-v",
+            "tests/test_cloud_backend.py",
+        ],
     },
     {
         "name": "local cloud flow integration test",
         "cwd": PROJECT_ROOT,
-        "command": [sys.executable, "tests/test_local_cloud_flow.py"],
+        "command": [
+            sys.executable,
+            "tests/test_local_cloud_flow.py",
+        ],
     },
 ]
 
@@ -58,17 +56,16 @@ def main():
     all_passed = True
 
     for test in TESTS:
-        passed = run_test(test)
-        if not passed:
+        if not run_test(test):
             all_passed = False
 
     print("\n=== Summary ===")
 
     if all_passed:
-        print("All local tests passed.")
+        print("All automated tests passed.")
         sys.exit(0)
 
-    print("One or more tests failed.")
+    print("One or more automated tests failed.")
     sys.exit(1)
 
 
