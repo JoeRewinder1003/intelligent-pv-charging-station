@@ -119,3 +119,27 @@ Before adding a field, confirm:
   the AWS firmware.
 - The SOH algorithm is not yet implemented.
 - `BatterySOHHistory` has not yet been created.
+
+## Pending physical validation
+
+The isolated VE.Direct parser test has been prepared but has not yet been
+executed because the SmartShunt and the remaining station hardware are
+not currently available.
+
+When physical access is restored, the test must verify:
+
+- Reception of complete VE.Direct blocks
+- Battery voltage from `V`
+- Battery current from `I`
+- Battery power from `P`
+- Battery SOC from `SOC`
+- Consumed amp-hours from `CE`
+- Correct units and sign conventions
+- Stable operation without serial-buffer overflows
+
+Until this validation is completed:
+
+- The SmartShunt values used by the AWS firmware remain simulated.
+- The `battery_diagnostics` MQTT publication remains unimplemented.
+- The SOH estimation algorithm remains pending.
+- `BatterySOHHistory` will not be created.
