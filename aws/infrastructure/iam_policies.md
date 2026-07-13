@@ -624,9 +624,12 @@ us-east-2
 
 - AWSLambdaBasicExecutionRole
 
-### Inline policies
+### Inline policy
 
-None currently required.
+- fis_processor_dynamodb_policy
 
-The preliminary fis_processor implementation does not yet access
-DynamoDB or AWS IoT Core.
+### Permissions
+
+- `dynamodb:PutItem` on `FISDecisionHistory`
+
+The current FIS implementation remains preliminary.

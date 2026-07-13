@@ -476,7 +476,7 @@ Commands are initially stored in `CommandLog` with status `pending`.
 
 ### Environment variables
 
-No environment variables are currently required.
+- FIS_DECISION_TABLE_NAME=FISDecisionHistory
 
 ### Source files
 
@@ -491,3 +491,18 @@ FISDecisionHistory or invoke command_dispatcher.
 
 The current FIS implementation is preliminary and must still be aligned
 with the final ESP32/article FIS definition.
+
+### Current persistence behavior
+
+Each evaluation is stored in `FISDecisionHistory`.
+
+Stored records include:
+
+- Input variables
+- Weather FIS output
+- Main FIS output
+- Cloud-side deterministic validation
+- Final requested mode
+- Generated command request
+
+The stored decisions are explicitly marked as preliminary

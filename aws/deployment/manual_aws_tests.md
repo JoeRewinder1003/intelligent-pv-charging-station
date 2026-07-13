@@ -4,11 +4,7 @@ This document defines the manual test sequence for validating the AWS cloud back
 
 The goal is to verify that DynamoDB tables, Lambda functions, IAM permissions, AWS IoT Core rules, and MQTT messages work correctly using controlled test events.
 
-## Test Principle
-
-The ESP32 should not be connected until the cloud backend has been validated with manual tests.
-
-Recommended validation sequence:
+## Recommended validation sequence:
 
 ```text
 1. Test Lambda functions manually
@@ -20,7 +16,7 @@ Recommended validation sequence:
 
 ## Important Note About `fis_processor`
 
-The current `fis_processor` Lambda is a preliminary functional draft. It is useful for testing the cloud architecture and data flow, but its membership functions and rule base must still be aligned with the final ESP32/article FIS before it is considered definitive.
+The current `fis_processor` Lambda is a preliminary functional draft.
 
 Therefore, early tests should validate:
 
@@ -826,4 +822,25 @@ Lambda console.
 
 This test validates the Lambda infrastructure and the general processing
 flow. The fuzzy inference implementation is preliminary and does not yet
-represent the definitive FIS from the article and ESP32 implementation.
+
+---
+
+## Preliminary FIS Decision History Test
+
+The preliminary `fis_processor` Lambda was tested with DynamoDB
+persistence enabled.
+
+### Verified results
+
+- A normal evaluation returned status code `200`.
+- The decision was stored in `FISDecisionHistory`.
+- The stored record included the FIS inputs, Weather Index, fuzzy mode,
+  deterministic validation, final requested mode, and command request.
+- A critical-lockout evaluation stored an `M0` and `LOCKOUT` decision.
+- No MQTT command was published.
+- No `CommandLog` record was created.
+
+### Scope limitation
+
+The stored FIS decisions are marked as preliminary and must still be
+aligned with the final article and ESP32 FIS implementation.

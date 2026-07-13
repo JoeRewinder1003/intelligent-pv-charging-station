@@ -1,7 +1,21 @@
 import json
+import os
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, List
 
+import boto3
+
+dynamodb = boto3.resource("dynamodb")
+
+FIS_DECISION_TABLE_NAME = os.environ.get(
+    "FIS_DECISION_TABLE_NAME",
+    "FISDecisionHistory",
+)
+
+fis_decision_table = dynamodb.Table(FIS_DECISION_TABLE_NAME)
+
+FIS_IMPLEMENTATION_VERSION = "preliminary_cloud_v1"
 
 OPERATING_MODES = {
     0: "M0",
@@ -42,6 +56,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         fis_result = evaluate_fis(payload)
         command_request = build_command_request(payload, fis_result)
+        save_fis_decision(
+            payload=payload,
+            fis_result=fis_result,
+            command_request=command_request,
+        )
 
         return response(
             200,
@@ -415,6 +434,85 @@ def build_command_request(payload: Dict[str, Any], fis_result: Dict[str, Any]) -
         },
     }
 
+def save_fis_decision(
+    payload: Dict[str, Any],
+    fis_result: Dict[str, Any],
+    command_request: Dict[str, Any],
+) -> None:
+    item = build_fis_history_item(
+        payload=payload,
+        fis_result=fis_result,
+        command_request=command_request,
+    )
+
+    fis_decision_table.put_item(
+        Item=convert_floats_to_decimal(item)
+    )
+
+
+def build_fis_history_item(
+    payload: Dict[str, Any],
+    fis_result: Dict[str, Any],
+    command_request: Dict[str, Any],
+) -> Dict[str, Any]:
+    requested_mode = fis_result[
+        "deterministic_validation"
+    ]["requested_mode"]
+
+    outputs_active = fis_result[
+        "final_decision"
+    ]["outputs_active_request"]
+
+    item: Dict[str, Any] = {
+        "station_id": payload["station_id"],
+        "timestamp": fis_result["timestamp"],
+        "fis_implementation_version": FIS_IMPLEMENTATION_VERSION,
+        "preliminary": True,
+        "inputs": fis_result["inputs"],
+        "weather_fis_output": fis_result["weather_fis_output"],
+        "main_fis_output": fis_result["main_fis_output"],
+        "deterministic_validation": {
+            "requested_mode": requested_mode,
+            "tracking_allowed": requested_mode
+            in {"M2", "M3", "M4", "M5"},
+            "charging_allowed": requested_mode
+            in {"M3", "M4", "M5"},
+            "blocked_reason": fis_result[
+                "deterministic_validation"
+            ]["blocked_reason"],
+        },
+        "final_decision": {
+            "operating_mode": requested_mode,
+            "outputs_active": outputs_active,
+        },
+        "command_request": command_request,
+    }
+
+    input_timestamp = payload.get("timestamp")
+
+    if isinstance(input_timestamp, str) and input_timestamp:
+        item["input_timestamp"] = input_timestamp
+
+    return item
+
+
+def convert_floats_to_decimal(data: Any) -> Any:
+    if isinstance(data, list):
+        return [
+            convert_floats_to_decimal(item)
+            for item in data
+        ]
+
+    if isinstance(data, dict):
+        return {
+            key: convert_floats_to_decimal(value)
+            for key, value in data.items()
+        }
+
+    if isinstance(data, float):
+        return Decimal(str(data))
+
+    return data
 
 def trimf(x: float, a: float, b: float, c: float) -> float:
     if x <= a or x >= c:
@@ -429,7 +527,7 @@ def trimf(x: float, a: float, b: float, c: float) -> float:
 
 
 def trapmf( x: float, a: float, b: float, c: float, d: float,) -> float:
-    
+
     if x < a or x > d:
         return 0.0
 
