@@ -593,9 +593,9 @@ us-east-2
 
 ### Permissions
 
-- dynamodb:PutItem on CommandLog
-- iot:Publish on `station/*/commands`
-
+- `dynamodb:PutItem` on `CommandLog`
+- `dynamodb:UpdateItem` on `CommandLog`
+- `iot:Publish` on `station/*/commands`
 
 ---
 

@@ -773,3 +773,35 @@ to use partial DynamoDB updates for `StationStatus`.
 
 Multiple cloud flows can now update `StationStatus` without replacing the
 complete station record.
+
+---
+
+## Command Lifecycle End-to-End Validation
+
+The command lifecycle was tested with the real ESP32 connected to AWS IoT Core.
+
+### Verified flow
+
+`command_dispatcher → AWS IoT Core → ESP32 → ACK → diagnostics → CommandLog`
+
+### Verified results
+
+- `command_dispatcher` initially stored the command with status `pending`.
+- After a successful AWS IoT Core publication, the status changed to `sent`.
+- The ESP32 received and locally validated the command.
+- With the simulated safety lockout disabled, the ESP32 returned an
+  acknowledgement with status `accepted`.
+- The acknowledgement updated the existing `CommandLog` record.
+- The final command record contained:
+  - `status: accepted`
+  - `applied: false`
+  - an ACK timestamp
+  - the resulting operating mode
+  - the local-validation message
+- No relay, charging output, tracking mechanism, or actuator was activated.
+
+### Result
+
+The complete cloud-to-device and device-to-cloud command lifecycle was
+successfully validated while preserving local ESP32 authority over physical
+actions.

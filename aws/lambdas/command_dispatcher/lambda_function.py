@@ -61,7 +61,25 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         topic = f"station/{command_payload['station_id']}/commands"
 
         save_command_to_dynamodb(command_payload)
-        publish_command_to_iot(topic, command_payload)
+
+        mqtt_payload = dict(command_payload)
+        mqtt_payload["status"] = "sent"
+
+        try:
+            publish_command_to_iot(topic, mqtt_payload)
+
+        except Exception as publish_error:
+            update_command_status(
+                command_payload=command_payload,
+                status="failed",
+                error_message=str(publish_error),
+            )
+            raise
+
+        update_command_status(
+            command_payload=command_payload,
+            status="sent",
+        )
 
         return response(
             status_code=200,
@@ -71,6 +89,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "command_id": command_payload["command_id"],
                 "command": command_payload["command"],
                 "topic": topic,
+                "status": "sent",
             },
         )
 
@@ -136,7 +155,7 @@ def build_command_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "command": payload["command"],
         "source": payload.get("source", "manual_cloud"),
         "parameters": payload.get("parameters", {}),
-        "status": "sent",
+        "status": "pending",
         "created_at": now_utc,
     }
 
@@ -148,6 +167,45 @@ def save_command_to_dynamodb(command_payload: Dict[str, Any]) -> None:
     item = convert_floats_to_decimal(command_payload)
     table.put_item(Item=item)
 
+def update_command_status(
+    command_payload: Dict[str, Any],
+    status: str,
+    error_message: str | None = None,
+) -> None:
+    dynamodb = boto3.resource("dynamodb")
+    table = dynamodb.Table(COMMAND_LOG_TABLE_NAME)
+
+    now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    update_expression = (
+        "SET #status = :status, "
+        "updated_at = :updated_at"
+    )
+
+    expression_names = {
+        "#status": "status",
+    }
+
+    expression_values = {
+        ":status": status,
+        ":updated_at": now_utc,
+    }
+
+    if error_message is not None:
+        update_expression += ", error_message = :error_message"
+        expression_values[":error_message"] = error_message
+
+    table.update_item(
+        Key={
+            "station_id": command_payload["station_id"],
+            "command_id": command_payload["command_id"],
+        },
+        UpdateExpression=update_expression,
+        ExpressionAttributeNames=expression_names,
+        ExpressionAttributeValues=convert_floats_to_decimal(
+            expression_values
+        ),
+    )
 
 def publish_command_to_iot(topic: str, command_payload: Dict[str, Any]) -> None:
     if not AWS_IOT_DATA_ENDPOINT:

@@ -418,6 +418,15 @@ Commands are published to:
 
 `station/{station_id}/commands`
 
+### Command lifecycle
+
+Commands are initially stored in `CommandLog` with status `pending`.
+
+- Successful MQTT publication changes the status to `sent`.
+- A publication error changes the status to `failed`.
+- A later ESP32 acknowledgement can change the status to `accepted`,
+  `blocked_by_safety`, `invalid_command`, or another supported ACK status.
+
 
 ---
 
@@ -447,3 +456,6 @@ Commands are published to:
 - Status test: aws/lambdas/diagnostics/test_event_status.json
 - Fault test: aws/lambdas/diagnostics/test_event_fault.json
 - Acknowledgement test: aws/lambdas/diagnostics/test_event_ack.json
+
+
+}}
