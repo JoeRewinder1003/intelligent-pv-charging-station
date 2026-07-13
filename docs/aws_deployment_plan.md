@@ -329,3 +329,21 @@ Recommended telemetry interval for early testing:
 ```
 
 For early AWS testing, manual MQTT messages should be used before continuous ESP32 telemetry.
+
+
+---
+
+## Pending Demand Estimation Definition
+
+The adaptive `demand_estimator` remains pending because the physical
+method for detecting scooter connection events has not been defined.
+
+Possible approaches include:
+
+- User-confirmed connection through a physical button.
+- Automatic session detection using charging-output current measurements.
+- A hybrid method combining user input and electrical confirmation.
+
+Implementation depends on the modifications that remain physically viable
+for the charging station. Until this mechanism is defined and validated,
+the system will use a fixed or externally supplied Demand Index.
