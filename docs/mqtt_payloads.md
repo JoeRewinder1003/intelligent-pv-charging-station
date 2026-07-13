@@ -224,6 +224,79 @@ blocked_by_safety
 invalid_command
 ```
 
+## Battery Diagnostics Payload
+
+Topic:
+
+```text
+station/{station_id}/battery_diagnostics
+```
+
+Direction:
+
+```text
+ESP32 → AWS
+```
+
+Purpose:
+
+This payload carries low-frequency Victron SmartShunt diagnostic data
+that may be useful for future battery SOH estimation without increasing
+the size of every normal telemetry message.
+
+Initial example:
+
+```json
+{
+  "station_id": "station_001",
+  "timestamp": "2026-07-13T21:00:00Z",
+  "battery_diagnostics": {
+    "consumed_ah": -24.6
+  },
+  "source": "smartshunt_vedirect"
+}
+```
+
+The first version includes only `consumed_ah`, obtained from the
+SmartShunt VE.Direct `CE` field.
+
+Recommended initial publication interval:
+
+```text
+5 minutes
+```
+
+This diagnostic payload must not initially be sent at the same frequency
+as normal telemetry.
+
+Before adding more SmartShunt fields, confirm that:
+
+1. The field is reliably available through VE.Direct.
+2. The field is required by a cloud or local function.
+3. The value cannot be derived from existing historical data.
+4. The publication frequency is justified.
+5. The ESP32 JSON and MQTT buffers remain sufficient.
+6. Telemetry, commands, acknowledgements, and local safety functions
+   continue operating correctly.
+
+The following indicators should be calculated in AWS whenever possible:
+
+- Charged energy
+- Discharged energy
+- Accumulated energy throughput
+- Equivalent full cycles
+- Time spent in different SOC ranges
+- Voltage trends under comparable loads
+- Preliminary usable-capacity estimates
+
+Current implementation status:
+
+- Payload contract defined.
+- Firmware publication not yet implemented.
+- AWS IoT rule not yet created.
+- Diagnostic storage not yet implemented.
+- SOH estimation algorithm not yet implemented.
+
 ## 6. Design Rule
 
 The cloud backend can recommend or request an operating state, but the ESP32 local deterministic safety layer has final authority over the physical system.
