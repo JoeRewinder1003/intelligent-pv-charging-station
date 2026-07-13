@@ -1,221 +1,428 @@
 # Architecture Notes — station_cloud_v1
 
-## System overview
+## 1. System purpose
 
-A solar photovoltaic charging station for low-power electric vehicles
-(primarily electric scooters) controlled locally by an ESP32 and supervised
-by an AWS cloud backend.
+`station_cloud_v1` is the AWS cloud backend for an ESP32-based solar
+charging station for low-power electric vehicles, mainly electric
+scooters.
 
-Communication between the ESP32 and AWS uses MQTT over TLS through
-AWS IoT Core. The ESP32 publishes telemetry and events; AWS processes
-the data, runs fuzzy logic decision systems, validates safety, and
-publishes commands back to the ESP32.
+The ESP32 performs local acquisition, hardware control, and immediate
+safety actions. AWS receives telemetry and events, stores historical and
+current state, evaluates cloud-side decision logic, records commands, and
+supports future diagnostic and maintenance functions.
+
+The thesis scope is broader than the fuzzy-logic implementation described
+in the article. The article FIS is a reference, not the complete final
+definition of the thesis system.
 
 ---
 
-## Architecture diagram (text)
+## 2. Current architecture
 
+```text
+ESP32
+  |
+  | MQTT over TLS
+  v
+AWS IoT Core
+  |
+  +--> telemetry rule --> telemetry_processor
+  |                         |
+  |                         +--> TelemetryHistory
+  |                         +--> partial update of StationStatus
+  |
+  +--> status rule ------> diagnostics
+  |                         |
+  |                         +--> partial update of StationStatus
+  |
+  +--> faults rule ------> diagnostics
+  |                         |
+  |                         +--> FaultEvents
+  |                         +--> partial update of StationStatus
+  |
+  +--> acknowledgements -> diagnostics
+  |                         |
+  |                         +--> update existing CommandLog item
+  |
+  +<-- command_dispatcher publishes MQTT commands
+                            |
+                            +--> CommandLog
 ```
-ESP32 (local controller)
-  │
-  │  Publishes every 15-30s (Basic Ingest)
-  ├──────────────────────────────────────────► AWS IoT Core
-  │  telemetry/raw                                   │
-  │  events/fault                              IoT Rules (SQL)
-  │  events/charging                                 │
-  │  status/heartbeat                    ┌───────────┴───────────┐
-  │  ack/command                         ▼                       ▼
-  │                          StationTelemetryProcessor   StationDiagnostics
-  │                                Lambda                    Lambda
-  │                                    │                       │
-  │                          ┌─────────┼──────────┐           │
-  │                          ▼         ▼          ▼           ▼
-  │                     Weather FIS  Main FIS  Safety    DynamoDB
-  │                          │         │       Check    (Faults,
-  │                          └────┬────┘         │      Commands,
-  │                               ▼              │      State)
-  │                        CommandDispatcher ◄───┘
-  │                            Lambda
-  │                               │
-  │  Subscribes to commands/#     │  Publishes command
-  └───────────────────────────────┘
-     station/{id}/commands/mode
-     station/{id}/commands/ota
-     ...
+
+A separate test-only rule was used to invoke `fis_processor` from
+telemetry. That rule is disabled after validation because the current FIS
+implementation is preliminary.
+
+---
+
+## 3. MQTT topics
+
+### Active topics
+
+```text
+station/{station_id}/telemetry
+station/{station_id}/status
+station/{station_id}/faults
+station/{station_id}/acks
+station/{station_id}/commands
 ```
 
+### Planned topic
+
+```text
+station/{station_id}/battery_diagnostics
+```
+
+The planned battery-diagnostics topic is reserved for low-frequency
+SmartShunt data and is not implemented yet.
+
 ---
 
-## Lambda function responsibilities
+## 4. Implemented Lambda functions
 
-### StationTelemetryProcessorLambda
+### telemetry_processor
 
-Triggered by: TelemetryRule (every telemetry message)
+Triggered by:
+
+```text
+station/+/telemetry
+```
 
 Responsibilities:
-1. Validate incoming payload (required fields, value ranges, stale timestamp).
-2. Run Weather FIS → compute `weather_index`.
-3. Run Main Decision FIS → compute recommended `operating_mode`.
-4. Run deterministic safety validation → may override FIS recommendation.
-5. Write telemetry record to StationTelemetry table (with TTL).
-6. Update current state in StationState table.
-7. Invoke CommandDispatcherLambda if the mode has changed or a new
-   command needs to be sent.
 
-### StationCommandDispatcherLambda
+1. Parse and validate incoming telemetry.
+2. Store each valid sample in `TelemetryHistory`.
+3. Partially update the latest state in `StationStatus`.
+4. Preserve attributes written by other Lambda functions.
 
-Triggered by: StationTelemetryProcessorLambda (internal invoke) or manually.
+This function does not run the cloud FIS and does not publish commands.
 
-Responsibilities:
-1. Receive the validated and safety-checked operating mode.
-2. Build the command JSON payload.
-3. Publish to `station/{station_id}/commands/mode` via IoT Core SDK.
-4. Write command record to StationCommands table with `ack_status = pending`.
+### diagnostics
 
-### StationDiagnosticsLambda
+Triggered by:
 
-Triggered by: FaultRule, ChargingRule, HeartbeatRule, AckRule.
+```text
+station/+/status
+station/+/faults
+station/+/acks
+```
 
 Responsibilities:
-1. Fault events → write to StationFaults table, update StationState.
-2. Charging events → update demand profile in StationState.
-3. Heartbeat → update `last_seen` and `connection_status` in StationState.
-4. ACK events → update `ack_status` in StationCommands table.
 
-### StationFirmwareUpdateManagerLambda
+1. Process station-status messages.
+2. Store fault events in `FaultEvents`.
+3. Partially update `StationStatus`.
+4. Update an existing `CommandLog` item when an ESP32 acknowledgement is
+   received.
+5. Reject acknowledgements for command identifiers that do not exist.
 
-Triggered by: manually or on a schedule (e.g. EventBridge once per day).
+### command_dispatcher
+
+Triggered manually during the current validation stage.
 
 Responsibilities:
-1. Check StationState for current firmware version.
-2. Check StationFirmware table for available updates.
-3. Generate a pre-signed S3 URL for the firmware binary.
-4. Publish OTA command to `station/{station_id}/commands/ota`.
-5. Record the update attempt in StationFirmware table.
+
+1. Validate a cloud command request.
+2. Create a `CommandLog` item with an initial lifecycle state.
+3. Publish the command to:
+
+```text
+station/{station_id}/commands
+```
+
+4. Update the command state after MQTT publication.
+5. Allow the ESP32 acknowledgement to complete the lifecycle through
+   `diagnostics`.
+
+Current command lifecycle:
+
+```text
+pending -> sent -> accepted / rejected / blocked_by_safety /
+invalid_command
+```
+
+### fis_processor
+
+Current status:
+
+```text
+Preliminary cloud implementation
+```
+
+Responsibilities:
+
+1. Validate the required FIS inputs.
+2. Evaluate the preliminary Weather FIS.
+3. Evaluate the preliminary Main FIS.
+4. Apply cloud-side deterministic restrictions.
+5. Store the result in `FISDecisionHistory`.
+6. Return a command request without publishing it.
+
+The current `fis_processor` is not connected automatically to
+`command_dispatcher`.
+
+Its membership functions, rule base, thresholds, and final role within the
+thesis architecture must still be aligned with the definitive cloud FIS.
 
 ---
 
-## Fuzzy logic systems
+## 5. Pending Lambda functions
 
-### Weather FIS (already implemented in simulation/)
+### demand_estimator
 
-- Inputs: `shortwave_radiation`, `cloud_cover`, `precipitation_probability`
-- Output: `weather_index` ∈ [0, 1]
-- Classification: BAD (< 0.35), REGULAR (0.35–0.65), GOOD (> 0.65)
-- Runs inside StationTelemetryProcessorLambda on every telemetry message.
-- Uses the pure-numpy implementation (Weather_index.py) — no scikit-fuzzy
-  dependency in Lambda to keep the deployment package small.
+Status:
 
-### Main Decision FIS (pending implementation)
+```text
+Pending physical and methodological definition
+```
 
-- Inputs: `battery_soc`, `p_net`, `local_irradiance`, `weather_index`, `demand_index`
-- Output: `operating_mode` ∈ {M0, M1, M2, M3, M4, M5}
-- Runs inside StationTelemetryProcessorLambda after Weather FIS.
+The adaptive demand mechanism is not implemented because the method for
+detecting scooter-connection events has not been selected.
 
----
+Possible future approaches include:
 
-## Deterministic safety validation layer
+- User confirmation through a physical button
+- Automatic detection using charging-output current
+- A hybrid method combining user input and electrical confirmation
 
-The FIS recommendation is never applied directly. It passes through a
-deterministic safety check inside StationTelemetryProcessorLambda:
+The decision depends on what physical modifications remain viable for the
+station.
 
-| Condition | Override action |
-|---|---|
-| `battery_soc` < 20% | Force M0 regardless of FIS output |
-| `battery_soc` < 30% | Cap at M1 (no outputs, no tracking) |
-| `fault_state` == `"critical"` | Force M0, set `safety_lockout = true` |
-| Any required field missing or NaN | Reject payload, do not dispatch command |
-| Timestamp older than 120 seconds | Treat as stale, do not dispatch command |
-| Actuator fault active | Set `tracking_allowed = false` |
+Until this is defined, the system may use a fixed or externally supplied
+Demand Index.
 
----
+### soh_estimator
 
-## ESP32 local safety protections
+Status:
 
-**The ESP32 must never rely exclusively on the cloud for safety.**
+```text
+Pending SmartShunt physical validation and algorithm definition
+```
 
-The following protections run locally on the ESP32 at all times,
-independent of MQTT connectivity:
+Planned inputs include frequent battery telemetry and selected
+low-frequency VE.Direct diagnostics.
 
-- If MQTT connection is lost for more than 3 minutes:
-  → Apply local safe mode (M1 or M0 depending on SOC).
-  → Disable all charging outputs.
-  → Hold solar tracker at last known safe position.
+The estimator must avoid increasing every MQTT telemetry payload
+unnecessarily. Values that can be derived from history should be
+calculated in AWS.
 
-- If local SOC reading drops below 20%:
-  → Force M0 immediately, regardless of last received cloud command.
-  → Publish fault event when connection is restored.
+### actuator_life_estimator
 
-- If any critical sensor returns an out-of-range or NaN value:
-  → Disable the affected output or subsystem.
-  → Publish fault event.
+Status:
 
-- If a charging output exceeds its current limit:
-  → Open the relay immediately (hardware interrupt or fast polling loop).
-  → Publish fault event.
+```text
+Pending implementation
+```
 
-These local protections are implemented in `esp32/main/safety.h` and
-run in the main loop independently of the MQTT task.
+Planned indicators include:
 
----
+- Movement count
+- Movement duration
+- Accumulated operating time
+- Estimated duty cycle
+- Maintenance state
 
-## Database strategy
+Physical validation is required before defining the definitive estimator.
 
-- DynamoDB only — no Timestream, no RDS in v1.
-- On-demand billing mode to stay within Free Tier.
-- TTL enabled on high-volume tables to control storage cost.
-- StationState is a single-item-per-station table for fast current-state lookup.
+### firmware_update_manager
 
----
+Status:
 
-## Storage strategy
+```text
+Future capability
+```
 
-- S3 is used only for OTA firmware binaries.
-- No raw telemetry is archived to S3 in v1 (DynamoDB TTL handles retention).
-- S3 bucket has versioning disabled and a lifecycle rule to delete objects
-  older than 180 days.
+OTA firmware updates are planned so the ESP32 can eventually be
+reprogrammed without a wired connection.
+
+OTA is not being implemented in the current stage because the present
+focus is cloud processing, data flow, and safe command handling.
 
 ---
 
-## CloudWatch Logs retention
+## 6. DynamoDB tables currently created
 
-| Log group | Retention |
-|---|---|
-| `/aws/lambda/StationTelemetryProcessorLambda` | 7 days |
-| `/aws/lambda/StationCommandDispatcherLambda` | 7 days |
-| `/aws/lambda/StationDiagnosticsLambda` | 7 days |
-| `/aws/lambda/StationFirmwareUpdateManagerLambda` | 7 days |
-| IoT Core rule error logs | 3 days |
+Region:
 
-7-day retention keeps logs available for debugging while staying within
-the CloudWatch Free Tier (5 GB ingestion/month, 5 GB storage/month).
+```text
+us-east-2
+```
+
+Current tables:
+
+| Table | Purpose | Partition key | Sort key |
+| --- | --- | --- | --- |
+| `TelemetryHistory` | Periodic telemetry history | `station_id` | `timestamp` |
+| `StationStatus` | Latest known station state | `station_id` | None |
+| `FaultEvents` | Fault and restriction history | `station_id` | `timestamp` |
+| `CommandLog` | Commands and acknowledgements | `station_id` | `command_id` |
+| `DemandProfile` | Fixed and future adaptive demand profile | `station_id` | `slot_id` |
+| `FISDecisionHistory` | Preliminary and future FIS decisions | `station_id` | `timestamp` |
+
+Not yet created:
+
+```text
+BatterySOHHistory
+ActuatorLifeHistory
+```
+
+These tables will be created only when their corresponding estimators are
+ready for meaningful testing.
 
 ---
 
-## AWS Budgets alerts
+## 7. AWS IoT rules currently created
 
-Three budget alerts should be configured in AWS Budgets:
+Active rules:
 
-| Alert threshold | Notification |
-|---|---|
-| $5.00 actual spend | Email |
-| $15.00 actual spend | Email |
-| $25.00 actual spend | Email + review architecture |
+```text
+station_telemetry_to_lambda
+station_status_to_lambda
+station_faults_to_lambda
+station_acks_to_lambda
+```
 
-Monthly budget ceiling: $30.00.
-Expected normal cost for a single-station prototype: $0–$2/month.
+Test-only rule:
+
+```text
+station_telemetry_to_preliminary_fis
+```
+
+The test-only FIS rule remains disabled after infrastructure validation.
 
 ---
 
-## Services explicitly excluded from v1
+## 8. Command authority and safety hierarchy
 
-| Service | Reason |
-|---|---|
-| EC2 | Not needed — Lambda handles all compute |
-| RDS | Not needed — DynamoDB is sufficient |
-| API Gateway | Not needed — no HTTP API required |
-| Step Functions | Adds cost and complexity — Lambda is sufficient |
-| Kinesis | Overkill for a single station at 30s intervals |
-| Timestream | Not needed in v1 — DynamoDB with TTL is sufficient |
-| Managed Grafana | Not needed — CloudWatch dashboards are free |
-| SNS | Optional in v1 — fault alerts can be added later |
+The cloud does not directly authorize physical actuation.
+
+The control hierarchy is:
+
+1. ESP32 local safety protections
+2. Technician lockouts
+3. Technician manual commands
+4. Validated cloud commands
+5. Cloud automatic recommendations
+6. Local basic routines
+
+Every cloud command must be validated again by the ESP32 before any
+physical action is applied.
+
+Therefore:
+
+```text
+Cloud result = recommendation or command request
+ESP32 deterministic layer = final physical authorization
+```
+
+Loss of cloud connectivity must not disable local safety.
+
+---
+
+## 9. Fuzzy decision system
+
+### Weather FIS reference inputs
+
+```text
+shortwave radiation
+cloud cover
+precipitation probability
+```
+
+Output:
+
+```text
+Weather Index in [0, 1]
+```
+
+### Main FIS reference inputs
+
+```text
+battery SOC
+net battery power
+local irradiance
+Weather Index
+Demand Index
+```
+
+Output:
+
+```text
+M0, M1, M2, M3, M4, or M5
+```
+
+The reference approach uses Mamdani inference and centroid
+defuzzification.
+
+The definitive thesis FIS may include additional cloud-derived
+information and must be documented separately from the article reference
+implementation.
+
+Safety thresholds must not be copied from old drafts without review.
+Thresholds used in preliminary tests are not automatically definitive
+hardware-protection thresholds.
+
+---
+
+## 10. SmartShunt and payload strategy
+
+Frequent battery telemetry should remain limited to the measurements
+needed for current supervision and control:
+
+```text
+voltage_v
+current_a
+power_w
+soc_percent
+```
+
+Low-frequency diagnostic values, such as consumed amp-hours, should use a
+separate payload when physically validated.
+
+Design constraints include:
+
+- MQTT payload size
+- ESP32 JSON memory
+- PubSubClient buffer size
+- ESP32 RAM and flash usage
+- Telemetry frequency
+- DynamoDB storage volume
+- Lambda invocation rate
+- Compatibility with commands and acknowledgements
+
+New SmartShunt fields must not be added indiscriminately to every
+telemetry message.
+
+---
+
+## 11. Current physical-validation status
+
+At the current stage, only the ESP32 is available.
+
+The following validations remain pending until access to the station
+hardware is restored:
+
+- Real SmartShunt VE.Direct acquisition
+- Battery-diagnostics publication
+- Charging-session detection
+- Real output-current measurements
+- Actuator usage measurements
+- Physical command application
+- Final local safety tests
+
+Simulated values may be used for cloud infrastructure tests, but they must
+be clearly identified as simulated.
+
+---
+
+## 12. Current development priorities
+
+The current priorities are:
+
+1. Keep the deployed AWS architecture consistent and documented.
+2. Strengthen local and cloud tests.
+3. Define the definitive thesis FIS and its cloud inputs.
+4. Preserve the ESP32 as final safety authority.
+5. Keep pending physical interfaces prepared but inactive.
+6. Avoid implementing OTA, adaptive demand, SOH, or actuator-life logic
+   before their required data and validation methods are available.
