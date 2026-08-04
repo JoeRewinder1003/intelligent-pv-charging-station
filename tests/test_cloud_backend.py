@@ -326,14 +326,98 @@ class FISProcessorTests(unittest.TestCase):
         )
         self.assertEqual(command_request["command"], "LOCKOUT")
 
-    def test_low_soc_caps_high_charging_mode(self):
+    def test_critical_soc_forces_m0_and_blocks_outputs(self):
+        result = fis.evaluate_deterministic_layer(
+            fis_mode="M5",
+            soc_percent=15.0,
+            fault_state="normal",
+            local_irradiance_wm2=800.0,
+            weather_index=0.8,
+        )
+
+        self.assertEqual(result["requested_mode"], "M0")
+        self.assertEqual(result["blocked_reason"], "critical_soc")
+        self.assertTrue(result["outputs_blocked"])
+        self.assertEqual(result["outputs_active"], 0)
+
+    def test_low_battery_caps_mode_to_m1(self):
+        result = fis.evaluate_deterministic_layer(
+            fis_mode="M5",
+            soc_percent=24.0,
+            fault_state="normal",
+            local_irradiance_wm2=800.0,
+            weather_index=0.8,
+        )
+
+        self.assertEqual(result["requested_mode"], "M1")
+        self.assertEqual(
+            result["blocked_reason"],
+            "low_battery_restriction",
+        )
+        self.assertTrue(result["tracking_blocked"])
+        self.assertTrue(result["outputs_blocked"])
+        self.assertEqual(result["outputs_active"], 0)
+
+    def test_soc_above_25_does_not_apply_low_battery_cap(self):
         requested_mode = fis.apply_cloud_side_validation(
             fis_mode="M5",
-            soc_percent=84.9,
+            soc_percent=25.1,
             fault_state="normal",
         )
 
-        self.assertEqual(requested_mode, "M2")
+        self.assertEqual(requested_mode, "M5")
+
+    def test_data_fault_caps_mode_to_m1(self):
+        result = fis.evaluate_deterministic_layer(
+            fis_mode="M4",
+            soc_percent=90.0,
+            fault_state="data_or_sensor_fault",
+            local_irradiance_wm2=700.0,
+            weather_index=0.8,
+        )
+
+        self.assertEqual(result["requested_mode"], "M1")
+        self.assertEqual(result["fault_state_level"], 2)
+        self.assertTrue(result["outputs_blocked"])
+        self.assertEqual(result["outputs_active"], 0)
+
+    def test_poor_tracking_reduces_m2_to_m1(self):
+        result = fis.evaluate_deterministic_layer(
+            fis_mode="M2",
+            soc_percent=90.0,
+            fault_state="normal",
+            local_irradiance_wm2=100.0,
+            weather_index=0.8,
+        )
+
+        self.assertEqual(result["requested_mode"], "M1")
+        self.assertTrue(result["tracking_blocked"])
+        self.assertFalse(result["tracking_allowed"])
+
+    def test_poor_tracking_keeps_charging_mode_but_disables_tracking(self):
+        result = fis.evaluate_deterministic_layer(
+            fis_mode="M4",
+            soc_percent=90.0,
+            fault_state="normal",
+            local_irradiance_wm2=100.0,
+            weather_index=0.8,
+        )
+
+        self.assertEqual(result["requested_mode"], "M4")
+        self.assertTrue(result["tracking_blocked"])
+        self.assertFalse(result["tracking_allowed"])
+        self.assertFalse(result["outputs_blocked"])
+        self.assertEqual(result["outputs_active"], 2)
+
+    def test_invalid_fault_state_is_rejected(self):
+        payload = json.loads(json.dumps(self.payload))
+        payload["fault_state"] = "unexpected_state"
+
+        errors = fis.validate_input(payload)
+
+        self.assertTrue(
+            any("fault_state must be one of" in error for error in errors)
+        )
 
     def test_trapezoid_shoulders_include_endpoints(self):
         self.assertEqual(fis.trapmf(0, 0, 0, 20, 40), 1.0)

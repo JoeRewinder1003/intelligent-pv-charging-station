@@ -16,7 +16,7 @@ FIS_DECISION_TABLE_NAME = os.environ.get(
 
 fis_decision_table = dynamodb.Table(FIS_DECISION_TABLE_NAME)
 
-FIS_IMPLEMENTATION_VERSION = "preliminary_cloud_v1"
+FIS_IMPLEMENTATION_VERSION = "article_v9_deterministic_v1"
 
 OPERATING_MODES = {
     0: "M0",
@@ -120,6 +120,21 @@ def validate_input(payload: Dict[str, Any]) -> List[str]:
     if isinstance(decision, dict) and "demand_index" in decision:
         validate_numeric(decision, "demand_index", errors, 0, 1)
 
+    fault_state = payload.get("fault_state", "normal")
+    allowed_fault_states = {
+        "normal",
+        "non_critical_restriction",
+        "data_or_sensor_fault",
+        "critical_lockout",
+    }
+    if not isinstance(fault_state, str):
+        errors.append("fault_state must be a string")
+    elif fault_state not in allowed_fault_states:
+        errors.append(
+            "fault_state must be one of: "
+            + ", ".join(sorted(allowed_fault_states))
+        )
+
     return errors
 
 
@@ -164,13 +179,13 @@ def evaluate_fis(payload: Dict[str, Any]) -> Dict[str, Any]:
         demand_index=inputs["demand_index"],
     )
 
-    requested_mode = apply_cloud_side_validation(
+    deterministic = evaluate_deterministic_layer(
         fis_mode=main_result["fis_mode"],
         soc_percent=inputs["soc_percent"],
         fault_state=payload.get("fault_state", "normal"),
+        local_irradiance_wm2=inputs["local_irradiance_wm2"],
+        weather_index=weather_index,
     )
-
-    outputs_active = mode_to_outputs(requested_mode)
 
     return {
         "timestamp": current_utc_timestamp(),
@@ -185,18 +200,10 @@ def evaluate_fis(payload: Dict[str, Any]) -> Dict[str, Any]:
             "centroid": round(main_result["centroid"], 4),
             "fis_mode": main_result["fis_mode"],
         },
-        "deterministic_validation": {
-            "requested_mode": requested_mode,
-            "blocked_reason": get_blocked_reason(
-                requested_mode,
-                main_result["fis_mode"],
-                payload.get("fault_state", "normal"),
-                inputs["soc_percent"],
-            ),
-        },
+        "deterministic_validation": deterministic,
         "final_decision": {
-            "operating_mode_request": requested_mode,
-            "outputs_active_request": outputs_active,
+            "operating_mode_request": deterministic["requested_mode"],
+            "outputs_active_request": deterministic["outputs_active"],
         },
     }
 
@@ -539,19 +546,135 @@ def evaluate_main_fis(
     }
 
 
+def mode_number(mode: str) -> int:
+    if mode not in {"M0", "M1", "M2", "M3", "M4", "M5"}:
+        raise ValueError(f"Unsupported operating mode: {mode}")
+    return int(mode[1])
+
+
+def evaluate_deterministic_layer(
+    fis_mode: str,
+    soc_percent: float,
+    fault_state: str,
+    local_irradiance_wm2: float,
+    weather_index: float,
+) -> Dict[str, Any]:
+    """
+    Apply the deterministic restrictions represented in the ESP32 article v9.
+
+    The ESP32 simulation's persistence counter is represented in the cloud by
+    the incoming ``data_or_sensor_fault`` state. Dwell-time stabilization is
+    intentionally not implemented in this stage because a Lambda invocation is
+    stateless; it will be added later using persistent station state.
+    """
+    requested_mode = fis_mode
+    fault_state_level = 0
+    functions_blocked = False
+    tracking_blocked = False
+    outputs_blocked = False
+    blocked_reasons: List[str] = []
+
+    critical_energy_fault = soc_percent <= 15.0
+    low_battery_restriction = 15.0 < soc_percent <= 25.0
+
+    if fault_state == "critical_lockout" or critical_energy_fault:
+        requested_mode = "M0"
+        fault_state_level = 3
+        functions_blocked = True
+        tracking_blocked = True
+        outputs_blocked = True
+        blocked_reasons.append(
+            "critical_lockout"
+            if fault_state == "critical_lockout"
+            else "critical_soc"
+        )
+    else:
+        if fault_state == "data_or_sensor_fault":
+            if mode_number(requested_mode) > 1:
+                requested_mode = "M1"
+            fault_state_level = max(fault_state_level, 2)
+            functions_blocked = True
+            tracking_blocked = True
+            outputs_blocked = True
+            blocked_reasons.append("data_or_sensor_fault")
+
+        if low_battery_restriction:
+            if mode_number(requested_mode) > 1:
+                requested_mode = "M1"
+            fault_state_level = max(fault_state_level, 1)
+            functions_blocked = True
+            tracking_blocked = True
+            outputs_blocked = True
+            blocked_reasons.append("low_battery_restriction")
+
+        if fault_state == "non_critical_restriction":
+            fault_state_level = max(fault_state_level, 1)
+            functions_blocked = True
+            blocked_reasons.append("non_critical_restriction")
+
+        poor_tracking_condition = (
+            local_irradiance_wm2 < 120.0 or weather_index < 0.20
+        )
+        if poor_tracking_condition and mode_number(requested_mode) >= 2:
+            if requested_mode == "M2":
+                requested_mode = "M1"
+            tracking_blocked = True
+            functions_blocked = True
+            fault_state_level = max(fault_state_level, 1)
+            blocked_reasons.append("poor_tracking_condition")
+
+        if mode_number(fis_mode) >= 3 and mode_number(requested_mode) < 3:
+            outputs_blocked = True
+            functions_blocked = True
+            fault_state_level = max(fault_state_level, 1)
+            if "charging_outputs_blocked" not in blocked_reasons:
+                blocked_reasons.append("charging_outputs_blocked")
+
+    outputs_active = mode_to_outputs(requested_mode)
+    if outputs_blocked or fault_state_level >= 2:
+        outputs_active = 0
+
+    if mode_number(fis_mode) >= 3 and outputs_active == 0:
+        outputs_blocked = True
+        functions_blocked = True
+        fault_state_level = max(fault_state_level, 1)
+        if "charging_outputs_blocked" not in blocked_reasons:
+            blocked_reasons.append("charging_outputs_blocked")
+
+    tracking_allowed = (
+        not tracking_blocked and mode_number(requested_mode) >= 2
+    )
+    charging_allowed = not outputs_blocked and outputs_active > 0
+
+    return {
+        "requested_mode": requested_mode,
+        "fault_state_level": fault_state_level,
+        "functions_blocked": functions_blocked,
+        "tracking_blocked": tracking_blocked,
+        "outputs_blocked": outputs_blocked,
+        "tracking_allowed": tracking_allowed,
+        "charging_allowed": charging_allowed,
+        "outputs_active": outputs_active,
+        "blocked_reason": blocked_reasons[0] if blocked_reasons else None,
+        "blocked_reasons": blocked_reasons,
+    }
+
+
 def apply_cloud_side_validation(
     fis_mode: str,
     soc_percent: float,
     fault_state: str,
+    local_irradiance_wm2: float = 1000.0,
+    weather_index: float = 1.0,
 ) -> str:
-    if fault_state == "critical_lockout":
-        return "M0"
-
-    if soc_percent < 85:
-        if fis_mode in {"M3", "M4", "M5"}:
-            return "M2"
-
-    return fis_mode
+    """Backward-compatible wrapper returning only the requested mode."""
+    return evaluate_deterministic_layer(
+        fis_mode=fis_mode,
+        soc_percent=soc_percent,
+        fault_state=fault_state,
+        local_irradiance_wm2=local_irradiance_wm2,
+        weather_index=weather_index,
+    )["requested_mode"]
 
 
 def get_blocked_reason(
@@ -560,14 +683,15 @@ def get_blocked_reason(
     fault_state: str,
     soc_percent: float,
 ) -> str | None:
-    if fault_state == "critical_lockout":
-        return "critical_lockout"
-
-    if requested_mode != fis_mode and soc_percent < 85:
-        return "low_soc_cloud_side_limit"
-
-    return None
-
+    """Compatibility helper for older callers and tests."""
+    result = evaluate_deterministic_layer(
+        fis_mode=fis_mode,
+        soc_percent=soc_percent,
+        fault_state=fault_state,
+        local_irradiance_wm2=1000.0,
+        weather_index=1.0,
+    )
+    return result["blocked_reason"]
 
 def mode_to_outputs(mode: str) -> int:
     if mode == "M3":
@@ -581,7 +705,8 @@ def mode_to_outputs(mode: str) -> int:
 
 def build_command_request(payload: Dict[str, Any], fis_result: Dict[str, Any]) -> Dict[str, Any]:
     station_id = payload["station_id"]
-    requested_mode = fis_result["deterministic_validation"]["requested_mode"]
+    deterministic = fis_result["deterministic_validation"]
+    requested_mode = deterministic["requested_mode"]
     outputs_active = fis_result["final_decision"]["outputs_active_request"]
 
     if requested_mode == "M0":
@@ -606,7 +731,7 @@ def build_command_request(payload: Dict[str, Any], fis_result: Dict[str, Any]) -
         "parameters": {
             "requested_mode": requested_mode,
             "max_outputs": outputs_active,
-            "tracking_allowed": requested_mode in {"M2", "M3", "M4", "M5"},
+            "tracking_allowed": deterministic["tracking_allowed"],
             "weather_index": fis_result["weather_fis_output"]["weather_index"],
             "fis_mode": fis_result["main_fis_output"]["fis_mode"],
         },
@@ -651,13 +776,30 @@ def build_fis_history_item(
         "main_fis_output": fis_result["main_fis_output"],
         "deterministic_validation": {
             "requested_mode": requested_mode,
-            "tracking_allowed": requested_mode
-            in {"M2", "M3", "M4", "M5"},
-            "charging_allowed": requested_mode
-            in {"M3", "M4", "M5"},
-            "blocked_reason": fis_result[
-                "deterministic_validation"
-            ]["blocked_reason"],
+            "fault_state_level": fis_result["deterministic_validation"][
+                "fault_state_level"
+            ],
+            "functions_blocked": fis_result["deterministic_validation"][
+                "functions_blocked"
+            ],
+            "tracking_blocked": fis_result["deterministic_validation"][
+                "tracking_blocked"
+            ],
+            "outputs_blocked": fis_result["deterministic_validation"][
+                "outputs_blocked"
+            ],
+            "tracking_allowed": fis_result["deterministic_validation"][
+                "tracking_allowed"
+            ],
+            "charging_allowed": fis_result["deterministic_validation"][
+                "charging_allowed"
+            ],
+            "blocked_reason": fis_result["deterministic_validation"][
+                "blocked_reason"
+            ],
+            "blocked_reasons": fis_result["deterministic_validation"][
+                "blocked_reasons"
+            ],
         },
         "final_decision": {
             "operating_mode": requested_mode,
