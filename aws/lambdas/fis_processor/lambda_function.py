@@ -228,57 +228,81 @@ def evaluate_weather_fis(
     cloud_cover_percent: float,
     precipitation_probability_percent: float,
 ) -> float:
-    sw_low = trapmf(shortwave_radiation_wm2, 0, 0, 200, 400)
-    sw_med = trimf(shortwave_radiation_wm2, 250, 500, 750)
-    sw_high = trapmf(shortwave_radiation_wm2, 600, 800, 1000, 1000)
+    """Evaluate the Weather FIS using the final ESP32 article v9 definition."""
 
-    cloud_low = trapmf(cloud_cover_percent, 0, 0, 20, 40)
-    cloud_med = trimf(cloud_cover_percent, 25, 50, 75)
-    cloud_high = trapmf(cloud_cover_percent, 60, 80, 100, 100)
+    rad_low = trapmf(shortwave_radiation_wm2, -50.0, 0.0, 150.0, 350.0)
+    rad_med = trimf(shortwave_radiation_wm2, 200.0, 500.0, 800.0)
+    rad_high = trapmf(shortwave_radiation_wm2, 650.0, 850.0, 1000.0, 1100.0)
 
-    prcp_low = trapmf(precipitation_probability_percent, 0, 0, 20, 40)
-    prcp_med = trimf(precipitation_probability_percent, 25, 50, 75)
-    prcp_high = trapmf(precipitation_probability_percent, 60, 80, 100, 100)
+    cloud_low = trapmf(cloud_cover_percent, -5.0, 0.0, 20.0, 40.0)
+    cloud_med = trimf(cloud_cover_percent, 25.0, 50.0, 75.0)
+    cloud_high = trapmf(cloud_cover_percent, 60.0, 80.0, 100.0, 105.0)
 
-    rules = []
+    precip_low = trapmf(
+        precipitation_probability_percent,
+        -5.0,
+        0.0,
+        15.0,
+        35.0,
+    )
+    precip_med = trimf(
+        precipitation_probability_percent,
+        20.0,
+        50.0,
+        80.0,
+    )
+    precip_high = trapmf(
+        precipitation_probability_percent,
+        65.0,
+        85.0,
+        100.0,
+        105.0,
+    )
 
-    # Good weather
-    rules.append(("high", min(sw_high, cloud_low, prcp_low)))
-    rules.append(("high", min(sw_high, cloud_med, prcp_low)))
+    out_poor = 0.0
+    out_moderate = 0.0
+    out_favorable = 0.0
 
-    # Medium weather
-    rules.append(("medium", min(sw_med, prcp_low)))
-    rules.append(("medium", min(sw_high, cloud_high)))
-    rules.append(("medium", min(sw_med, cloud_med, prcp_med)))
+    # Favorable weather rules.
+    out_favorable = max(out_favorable, min(rad_high, cloud_low, precip_low))
+    out_favorable = max(out_favorable, min(rad_high, cloud_med, precip_low))
+    out_favorable = max(out_favorable, min(rad_med, cloud_low, precip_low))
 
-    # Poor weather
-    rules.append(("low", sw_low))
-    rules.append(("low", cloud_high))
-    rules.append(("low", prcp_high))
-    rules.append(("low", min(sw_med, prcp_high)))
+    # Moderate weather rules.
+    out_moderate = max(out_moderate, min(rad_med, cloud_med, precip_low))
+    out_moderate = max(out_moderate, min(rad_med, cloud_low, precip_med))
+    out_moderate = max(out_moderate, min(rad_high, cloud_high, precip_low))
+    out_moderate = max(out_moderate, min(rad_high, cloud_med, precip_med))
+    out_moderate = max(out_moderate, min(rad_low, cloud_low, precip_low))
 
-    universe = [i / 100 for i in range(0, 101)]
-    aggregated = []
+    # Poor weather rules.
+    out_poor = max(out_poor, rad_low)
+    out_poor = max(out_poor, cloud_high)
+    out_poor = max(out_poor, precip_high)
+    out_poor = max(out_poor, min(cloud_med, precip_med))
 
-    for x in universe:
-        low_mf = trapmf(x, 0.0, 0.0, 0.25, 0.45)
-        med_mf = trimf(x, 0.30, 0.50, 0.70)
-        high_mf = trapmf(x, 0.55, 0.75, 1.0, 1.0)
+    numerator = 0.0
+    denominator = 0.0
 
-        value = 0.0
+    for i in range(101):
+        x = i / 100.0
 
-        for label, strength in rules:
-            if label == "low":
-                value = max(value, min(strength, low_mf))
-            elif label == "medium":
-                value = max(value, min(strength, med_mf))
-            elif label == "high":
-                value = max(value, min(strength, high_mf))
+        poor_mf = trapmf(x, -0.10, 0.00, 0.20, 0.45)
+        moderate_mf = trimf(x, 0.25, 0.50, 0.75)
+        favorable_mf = trapmf(x, 0.55, 0.80, 1.00, 1.10)
 
-        aggregated.append(value)
+        mu_poor = min(out_poor, poor_mf)
+        mu_moderate = min(out_moderate, moderate_mf)
+        mu_favorable = min(out_favorable, favorable_mf)
+        mu_aggregated = max(mu_poor, mu_moderate, mu_favorable)
 
-    return centroid(universe, aggregated, default=0.5)
+        numerator += x * mu_aggregated
+        denominator += mu_aggregated
 
+    if denominator <= 0.0001:
+        return 0.0
+
+    return numerator / denominator
 
 def evaluate_main_fis(
     soc_percent: float,
