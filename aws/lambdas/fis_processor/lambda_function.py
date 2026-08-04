@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -311,73 +312,226 @@ def evaluate_main_fis(
     weather_index: float,
     demand_index: float,
 ) -> Dict[str, Any]:
-    soc_low = trapmf(soc_percent, 0, 0, 80, 85)
-    soc_med = trimf(soc_percent, 80, 88, 96)
-    soc_high = trapmf(soc_percent, 90, 96, 100, 100)
+    """Evaluate the Main FIS using the final ESP32 article v9 definition."""
 
-    p_neg = trapmf(p_net_w, -500, -500, -120, -20)
-    p_bal = trimf(p_net_w, -80, 0, 80)
-    p_pos = trapmf(p_net_w, 20, 120, 500, 500)
+    soc_critical = trapmf(soc_percent, -5.0, 0.0, 15.0, 25.0)
+    soc_low = trimf(soc_percent, 15.0, 30.0, 45.0)
+    soc_medium = trimf(soc_percent, 35.0, 55.0, 75.0)
+    soc_high = trapmf(soc_percent, 65.0, 80.0, 100.0, 105.0)
+    soc_full = trapmf(soc_percent, 85.0, 92.0, 100.0, 105.0)
 
-    irr_low = trapmf(local_irradiance_wm2, 0, 0, 250, 400)
-    irr_med = trimf(local_irradiance_wm2, 300, 550, 800)
-    irr_high = trapmf(local_irradiance_wm2, 650, 800, 1000, 1000)
+    p_negative = trapmf(p_net_w, -400.0, -300.0, -60.0, 0.0)
+    p_slight_negative = trapmf(p_net_w, -180.0, -120.0, -20.0, 20.0)
+    p_strong_negative = trapmf(p_net_w, -450.0, -350.0, -220.0, -120.0)
+    p_balanced = trimf(p_net_w, -80.0, 0.0, 80.0)
+    p_positive = trapmf(p_net_w, 0.0, 60.0, 300.0, 400.0)
 
-    w_low = trapmf(weather_index, 0.0, 0.0, 0.25, 0.45)
-    w_med = trimf(weather_index, 0.30, 0.50, 0.70)
-    w_high = trapmf(weather_index, 0.55, 0.75, 1.0, 1.0)
+    irr_low = trapmf(local_irradiance_wm2, -50.0, 0.0, 150.0, 350.0)
+    irr_med = trimf(local_irradiance_wm2, 250.0, 500.0, 750.0)
+    irr_high = trapmf(local_irradiance_wm2, 650.0, 850.0, 1000.0, 1100.0)
 
-    d_low = trapmf(demand_index, 0.0, 0.0, 0.25, 0.45)
-    d_med = trimf(demand_index, 0.30, 0.50, 0.70)
-    d_high = trapmf(demand_index, 0.55, 0.75, 1.0, 1.0)
+    w_poor = trapmf(weather_index, -0.10, 0.00, 0.20, 0.45)
+    w_moderate = trimf(weather_index, 0.25, 0.50, 0.75)
+    w_favorable = trapmf(weather_index, 0.55, 0.80, 1.00, 1.10)
 
-    rules = []
+    d_low = trapmf(demand_index, -0.10, 0.00, 0.20, 0.45)
+    d_medium = trimf(demand_index, 0.25, 0.50, 0.75)
+    d_high = trapmf(demand_index, 0.55, 0.80, 1.00, 1.10)
 
-    # Protection and low-energy states
-    rules.append((0, soc_low))
-    rules.append((1, min(soc_med, p_neg, irr_low)))
-    rules.append((2, min(soc_med, p_pos)))
+    energy_ok = max(p_balanced, p_positive)
+    solar_ok = max(irr_med, irr_high)
+    weather_ok = max(w_moderate, w_favorable)
+    demand_active = max(d_medium, d_high)
 
-    # Tracking / telemetry states
-    rules.append((2, min(soc_high, irr_med, w_med, d_low)))
-    rules.append((2, min(soc_high, irr_high, w_high, d_low)))
+    battery_service_available = min(soc_high, demand_active)
+    high_energy_service = min(
+        soc_full,
+        min(d_high, max(p_positive, min(p_balanced, solar_ok))),
+    )
 
-    # Charging service levels
-    rules.append((3, min(soc_high, p_pos, irr_med, w_med, d_med)))
-    rules.append((3, min(soc_med, p_pos, irr_high, w_high, d_med)))
+    output_activation = [0.0] * 6
 
-    rules.append((4, min(soc_high, p_pos, irr_high, w_high, d_med)))
-    rules.append((4, min(soc_high, p_pos, irr_med, w_high, d_high)))
+    # Dominant safety and low-energy rules.
+    output_activation[0] = max(output_activation[0], soc_critical)
+    output_activation[0] = max(
+        output_activation[0],
+        min(soc_low, p_negative),
+    )
+    output_activation[1] = max(
+        output_activation[1],
+        min(soc_low, p_balanced),
+    )
+    output_activation[1] = max(
+        output_activation[1],
+        min(soc_low, irr_low),
+    )
+    output_activation[1] = max(
+        output_activation[1],
+        min(soc_high, min(irr_low, w_poor)),
+    )
 
-    rules.append((5, min(soc_high, p_pos, irr_high, w_high, d_high)))
+    # Basic operational availability.
+    output_activation[2] = max(
+        output_activation[2],
+        min(soc_medium, p_balanced),
+    )
+    output_activation[2] = max(
+        output_activation[2],
+        min(soc_medium, min(irr_med, w_moderate)),
+    )
+    output_activation[2] = max(
+        output_activation[2],
+        min(soc_high, min(energy_ok, min(solar_ok, w_poor))),
+    )
 
-    # Conservative fallback when energy balance is not clearly positive
-    rules.append((2, min(soc_high, p_bal, d_low)))
-    rules.append((3, min(soc_high, p_bal, d_med)))
-    rules.append((3, min(soc_high, p_bal, d_high)))
+    # One-output rules.
+    output_activation[3] = max(
+        output_activation[3],
+        min(soc_medium, min(p_positive, min(irr_med, w_moderate))),
+    )
+    output_activation[3] = max(
+        output_activation[3],
+        min(soc_high, min(p_balanced, min(solar_ok, weather_ok))),
+    )
+    output_activation[3] = max(
+        output_activation[3],
+        min(soc_high, min(p_positive, min(solar_ok, d_low))),
+    )
+    output_activation[3] = max(
+        output_activation[3],
+        min(soc_high, min(p_positive, min(solar_ok, demand_active))),
+    )
+    output_activation[3] = max(
+        output_activation[3],
+        min(soc_full, min(p_positive, demand_active)),
+    )
+    output_activation[3] = max(
+        output_activation[3],
+        min(battery_service_available, p_balanced),
+    )
+    output_activation[3] = max(
+        output_activation[3],
+        min(battery_service_available, p_slight_negative),
+    )
+    output_activation[3] = max(
+        output_activation[3],
+        min(battery_service_available, min(w_poor, irr_low)),
+    )
 
-    universe = [i / 20 for i in range(0, 101)]  # 0.00 to 5.00
-    aggregated = []
+    # Two-output rules.
+    output_activation[4] = max(
+        output_activation[4],
+        min(soc_full, min(d_high, max(p_balanced, p_slight_negative))),
+    )
+    output_activation[4] = max(
+        output_activation[4],
+        min(
+            soc_high,
+            min(p_positive, min(irr_high, min(w_favorable, d_medium))),
+        ),
+    )
+    output_activation[4] = max(
+        output_activation[4],
+        min(
+            soc_high,
+            min(p_positive, min(irr_high, min(w_moderate, d_high))),
+        ),
+    )
+    output_activation[4] = max(
+        output_activation[4],
+        min(
+            soc_medium,
+            min(p_positive, min(irr_high, min(w_favorable, d_high))),
+        ),
+    )
+    output_activation[4] = max(
+        output_activation[4],
+        min(
+            soc_full,
+            min(p_positive, min(solar_ok, min(weather_ok, d_high))),
+        ),
+    )
+    output_activation[4] = max(
+        output_activation[4],
+        min(soc_full, min(p_positive, demand_active)),
+    )
 
-    for x in universe:
-        mode_mfs = {
-            0: trapmf(x, 0.0, 0.0, 0.3, 0.7),
-            1: trimf(x, 0.5, 1.0, 1.5),
-            2: trimf(x, 1.5, 2.0, 2.5),
-            3: trimf(x, 2.5, 3.0, 3.5),
-            4: trimf(x, 3.5, 4.0, 4.5),
-            5: trapmf(x, 4.3, 4.7, 5.0, 5.0),
-        }
+    # Three-output rules.
+    output_activation[5] = max(
+        output_activation[5],
+        min(soc_full, min(p_positive, min(irr_high, d_high))),
+    )
+    output_activation[5] = max(
+        output_activation[5],
+        min(soc_full, min(p_positive, min(solar_ok, d_high))),
+    )
+    output_activation[5] = max(
+        output_activation[5],
+        min(soc_full, min(energy_ok, min(irr_high, d_high))),
+    )
+    output_activation[5] = max(
+        output_activation[5],
+        min(high_energy_service, weather_ok),
+    )
+    output_activation[5] = max(
+        output_activation[5],
+        min(
+            soc_high,
+            min(p_positive, min(irr_high, min(w_favorable, d_high))),
+        ),
+    )
 
-        value = 0.0
+    # Conservative complementary rules.
+    output_activation[1] = max(
+        output_activation[1],
+        min(p_strong_negative, max(d_medium, d_high)),
+    )
+    output_activation[1] = max(
+        output_activation[1],
+        min(soc_low, min(p_negative, max(d_medium, d_high))),
+    )
+    output_activation[2] = max(
+        output_activation[2],
+        min(w_poor, min(soc_medium, energy_ok)),
+    )
 
-        for mode, strength in rules:
-            value = max(value, min(strength, mode_mfs[mode]))
+    numerator = 0.0
+    denominator = 0.0
 
-        aggregated.append(value)
+    for i in range(501):
+        x = i / 100.0
+        mu_aggregated = 0.0
 
-    crisp_value = centroid(universe, aggregated, default=1.0)
-    mode_number = max(0, min(5, int(round(crisp_value))))
+        for mode in range(6):
+            if mode == 0:
+                mode_membership = trapmf(x, -0.5, 0.0, 0.35, 0.85)
+            elif mode == 1:
+                mode_membership = trimf(x, 0.3, 1.0, 1.7)
+            elif mode == 2:
+                mode_membership = trimf(x, 1.3, 2.0, 2.7)
+            elif mode == 3:
+                mode_membership = trimf(x, 2.3, 3.0, 3.7)
+            elif mode == 4:
+                mode_membership = trimf(x, 3.3, 4.0, 4.7)
+            else:
+                mode_membership = trapmf(x, 4.15, 4.65, 5.0, 5.5)
+
+            mu_aggregated = max(
+                mu_aggregated,
+                min(output_activation[mode], mode_membership),
+            )
+
+        numerator += x * mu_aggregated
+        denominator += mu_aggregated
+
+    if denominator <= 0.0001:
+        crisp_value = 0.0
+        mode_number = 0
+    else:
+        crisp_value = numerator / denominator
+        # Arduino roundf() rounds positive half-values away from zero.
+        mode_number = int(math.floor(crisp_value + 0.5))
+        mode_number = max(0, min(5, mode_number))
 
     return {
         "centroid": crisp_value,
