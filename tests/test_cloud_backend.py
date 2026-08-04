@@ -279,10 +279,21 @@ class FISProcessorTests(unittest.TestCase):
         )
 
     def test_valid_fis_event_is_saved(self):
-        with patch.object(
-            fis,
-            "save_fis_decision",
-        ) as save_decision:
+        with (
+            patch.object(
+                fis,
+                "load_fis_state",
+                return_value=None,
+            ) as load_state,
+            patch.object(
+                fis,
+                "save_fis_state",
+            ) as save_state,
+            patch.object(
+                fis,
+                "save_fis_decision",
+            ) as save_decision,
+        ):
             result = fis.lambda_handler(self.payload, None)
 
         self.assertEqual(result["statusCode"], 200)
@@ -291,6 +302,8 @@ class FISProcessorTests(unittest.TestCase):
             body["message"],
             "FIS decision evaluated successfully",
         )
+        load_state.assert_called_once_with("station_001")
+        save_state.assert_called_once()
         save_decision.assert_called_once()
 
     def test_invalid_fis_event_returns_400_without_write(self):
@@ -418,6 +431,187 @@ class FISProcessorTests(unittest.TestCase):
         self.assertTrue(
             any("fault_state must be one of" in error for error in errors)
         )
+
+    def test_first_valid_decision_initializes_applied_mode(self):
+        deterministic = {
+            "fault_state_level": 0,
+            "outputs_blocked": False,
+        }
+
+        result = fis.stabilize_operating_mode(
+            requested_mode="M4",
+            deterministic=deterministic,
+            previous_state=None,
+            evaluation_time="2026-08-04T00:00:00Z",
+        )
+
+        self.assertEqual(result["applied_mode"], "M4")
+        self.assertTrue(result["command_required"])
+        self.assertEqual(
+            result["decision_reason"],
+            "initialized_from_first_valid_decision",
+        )
+
+    def test_candidate_waits_for_confirmation_and_dwell(self):
+        deterministic = {
+            "fault_state_level": 0,
+            "outputs_blocked": False,
+        }
+        state = {
+            "applied_mode": "M2",
+            "candidate_mode": "M4",
+            "candidate_since": "2026-08-04T00:00:00Z",
+            "last_mode_change_at": "2026-08-04T00:00:00Z",
+            "last_evaluation_at": "2026-08-04T00:00:00Z",
+        }
+
+        waiting_confirmation = fis.stabilize_operating_mode(
+            requested_mode="M4",
+            deterministic=deterministic,
+            previous_state=state,
+            evaluation_time="2026-08-04T00:09:00Z",
+        )
+        self.assertEqual(waiting_confirmation["applied_mode"], "M2")
+        self.assertFalse(waiting_confirmation["command_required"])
+        self.assertEqual(
+            waiting_confirmation["decision_reason"],
+            "waiting_for_candidate_confirmation",
+        )
+
+        waiting_dwell = fis.stabilize_operating_mode(
+            requested_mode="M4",
+            deterministic=deterministic,
+            previous_state=state,
+            evaluation_time="2026-08-04T00:10:00Z",
+        )
+        self.assertEqual(waiting_dwell["applied_mode"], "M2")
+        self.assertEqual(
+            waiting_dwell["decision_reason"],
+            "waiting_for_minimum_dwell",
+        )
+
+        applied = fis.stabilize_operating_mode(
+            requested_mode="M4",
+            deterministic=deterministic,
+            previous_state=state,
+            evaluation_time="2026-08-04T00:15:00Z",
+        )
+        self.assertEqual(applied["applied_mode"], "M4")
+        self.assertTrue(applied["mode_changed"])
+        self.assertTrue(applied["command_required"])
+
+    def test_safety_reduction_is_applied_immediately(self):
+        deterministic = {
+            "fault_state_level": 1,
+            "outputs_blocked": True,
+        }
+        state = {
+            "applied_mode": "M4",
+            "candidate_mode": "M5",
+            "candidate_since": "2026-08-04T00:05:00Z",
+            "last_mode_change_at": "2026-08-04T00:00:00Z",
+            "last_evaluation_at": "2026-08-04T00:05:00Z",
+        }
+
+        result = fis.stabilize_operating_mode(
+            requested_mode="M1",
+            deterministic=deterministic,
+            previous_state=state,
+            evaluation_time="2026-08-04T00:06:00Z",
+        )
+
+        self.assertEqual(result["applied_mode"], "M1")
+        self.assertTrue(result["safety_reduction"])
+        self.assertTrue(result["command_required"])
+        self.assertEqual(
+            result["decision_reason"],
+            "safety_reduction_applied_immediately",
+        )
+
+    def test_candidate_is_cleared_when_request_returns_to_applied_mode(self):
+        deterministic = {
+            "fault_state_level": 0,
+            "outputs_blocked": False,
+        }
+        state = {
+            "applied_mode": "M2",
+            "candidate_mode": "M4",
+            "candidate_since": "2026-08-04T00:00:00Z",
+            "last_mode_change_at": "2026-08-03T23:30:00Z",
+            "last_evaluation_at": "2026-08-04T00:05:00Z",
+        }
+
+        result = fis.stabilize_operating_mode(
+            requested_mode="M2",
+            deterministic=deterministic,
+            previous_state=state,
+            evaluation_time="2026-08-04T00:06:00Z",
+        )
+
+        self.assertEqual(result["applied_mode"], "M2")
+        self.assertEqual(result["candidate_mode"], "M2")
+        self.assertIsNone(result["candidate_since"])
+        self.assertFalse(result["command_required"])
+
+    def test_command_uses_stabilized_mode_not_unconfirmed_request(self):
+        previous_state = {
+            "applied_mode": "M2",
+            "candidate_mode": "M2",
+            "candidate_since": None,
+            "last_mode_change_at": "2026-08-04T00:00:00Z",
+            "last_evaluation_at": "2026-08-04T00:00:00Z",
+        }
+
+        fis_result = fis.evaluate_fis(
+            self.payload,
+            previous_state=previous_state,
+            evaluation_time="2026-08-04T00:01:00Z",
+        )
+        command_request = fis.build_command_request(
+            self.payload,
+            fis_result,
+        )
+
+        self.assertEqual(
+            fis_result["deterministic_validation"]["requested_mode"],
+            "M4",
+        )
+        self.assertEqual(
+            fis_result["final_decision"]["operating_mode"],
+            "M2",
+        )
+        self.assertFalse(
+            fis_result["final_decision"]["command_required"],
+        )
+        self.assertEqual(command_request["command"], "ENABLE_TRACKING")
+        self.assertEqual(
+            command_request["parameters"]["applied_mode"],
+            "M2",
+        )
+
+    def test_save_fis_state_updates_station_status(self):
+        stabilization = {
+            "requested_mode": "M4",
+            "applied_mode": "M2",
+            "candidate_mode": "M4",
+            "candidate_since": "2026-08-04T00:01:00Z",
+            "last_mode_change_at": "2026-08-04T00:00:00Z",
+            "last_evaluation_at": "2026-08-04T00:01:00Z",
+        }
+
+        with patch.object(
+            fis.status_table,
+            "update_item",
+        ) as update_item:
+            fis.save_fis_state("station_001", stabilization)
+
+        update_item.assert_called_once()
+        kwargs = update_item.call_args.kwargs
+        self.assertEqual(
+            kwargs["Key"],
+            {"station_id": "station_001"},
+        )
+        self.assertIn("fis_state", kwargs["UpdateExpression"])
 
     def test_trapezoid_shoulders_include_endpoints(self):
         self.assertEqual(fis.trapmf(0, 0, 0, 20, 40), 1.0)

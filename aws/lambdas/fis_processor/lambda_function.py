@@ -13,10 +13,22 @@ FIS_DECISION_TABLE_NAME = os.environ.get(
     "FIS_DECISION_TABLE_NAME",
     "FISDecisionHistory",
 )
+STATUS_TABLE_NAME = os.environ.get(
+    "STATUS_TABLE_NAME",
+    "StationStatus",
+)
 
 fis_decision_table = dynamodb.Table(FIS_DECISION_TABLE_NAME)
+status_table = dynamodb.Table(STATUS_TABLE_NAME)
 
-FIS_IMPLEMENTATION_VERSION = "article_v9_deterministic_v1"
+FIS_IMPLEMENTATION_VERSION = "article_v9_stateful_v1"
+
+MODE_CONFIRMATION_SECONDS = int(
+    os.environ.get("MODE_CONFIRMATION_SECONDS", "600")
+)
+MIN_MODE_DWELL_SECONDS = int(
+    os.environ.get("MIN_MODE_DWELL_SECONDS", "900")
+)
 
 OPERATING_MODES = {
     0: "M0",
@@ -55,8 +67,21 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 },
             )
 
-        fis_result = evaluate_fis(payload)
+        station_id = payload["station_id"]
+        previous_state = load_fis_state(station_id)
+        evaluation_time = current_utc_timestamp()
+
+        fis_result = evaluate_fis(
+            payload,
+            previous_state=previous_state,
+            evaluation_time=evaluation_time,
+        )
         command_request = build_command_request(payload, fis_result)
+
+        save_fis_state(
+            station_id=station_id,
+            stabilization=fis_result["mode_stabilization"],
+        )
         save_fis_decision(
             payload=payload,
             fis_result=fis_result,
@@ -162,7 +187,11 @@ def validate_numeric(
         errors.append(f"{field} must be <= {max_value}")
 
 
-def evaluate_fis(payload: Dict[str, Any]) -> Dict[str, Any]:
+def evaluate_fis(
+    payload: Dict[str, Any],
+    previous_state: Dict[str, Any] | None = None,
+    evaluation_time: str | None = None,
+) -> Dict[str, Any]:
     inputs = extract_fis_inputs(payload)
 
     weather_index = evaluate_weather_fis(
@@ -187,8 +216,22 @@ def evaluate_fis(payload: Dict[str, Any]) -> Dict[str, Any]:
         weather_index=weather_index,
     )
 
+    timestamp = evaluation_time or current_utc_timestamp()
+    stabilization = stabilize_operating_mode(
+        requested_mode=deterministic["requested_mode"],
+        deterministic=deterministic,
+        previous_state=previous_state,
+        evaluation_time=timestamp,
+    )
+
+    applied_mode = stabilization["applied_mode"]
+    outputs_active = mode_to_outputs(applied_mode)
+
+    if deterministic["outputs_blocked"] or deterministic["fault_state_level"] >= 2:
+        outputs_active = 0
+
     return {
-        "timestamp": current_utc_timestamp(),
+        "timestamp": timestamp,
         "inputs": {
             **inputs,
             "weather_index": round(weather_index, 4),
@@ -201,9 +244,12 @@ def evaluate_fis(payload: Dict[str, Any]) -> Dict[str, Any]:
             "fis_mode": main_result["fis_mode"],
         },
         "deterministic_validation": deterministic,
+        "mode_stabilization": stabilization,
         "final_decision": {
-            "operating_mode_request": deterministic["requested_mode"],
-            "outputs_active_request": deterministic["outputs_active"],
+            "requested_mode": deterministic["requested_mode"],
+            "operating_mode": applied_mode,
+            "outputs_active": outputs_active,
+            "command_required": stabilization["command_required"],
         },
     }
 
@@ -660,6 +706,260 @@ def evaluate_deterministic_layer(
     }
 
 
+
+def parse_utc_timestamp(value: str | None) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+
+    normalized = value
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed.astimezone(timezone.utc)
+
+
+def default_fis_state(
+    requested_mode: str,
+    evaluation_time: str,
+) -> Dict[str, Any]:
+    return {
+        "applied_mode": requested_mode,
+        "candidate_mode": requested_mode,
+        "candidate_since": None,
+        "last_mode_change_at": evaluation_time,
+        "last_evaluation_at": evaluation_time,
+        "initialized": True,
+    }
+
+
+def normalize_fis_state(
+    previous_state: Dict[str, Any] | None,
+    requested_mode: str,
+    evaluation_time: str,
+) -> Dict[str, Any]:
+    if not previous_state:
+        return default_fis_state(requested_mode, evaluation_time)
+
+    applied_mode = previous_state.get("applied_mode")
+    candidate_mode = previous_state.get("candidate_mode")
+
+    if applied_mode not in OPERATING_MODES.values():
+        applied_mode = requested_mode
+
+    if candidate_mode not in OPERATING_MODES.values():
+        candidate_mode = applied_mode
+
+    last_mode_change_at = previous_state.get("last_mode_change_at")
+    if parse_utc_timestamp(last_mode_change_at) is None:
+        last_mode_change_at = evaluation_time
+
+    candidate_since = previous_state.get("candidate_since")
+    if parse_utc_timestamp(candidate_since) is None:
+        candidate_since = None
+
+    return {
+        "applied_mode": applied_mode,
+        "candidate_mode": candidate_mode,
+        "candidate_since": candidate_since,
+        "last_mode_change_at": last_mode_change_at,
+        "last_evaluation_at": previous_state.get(
+            "last_evaluation_at",
+            evaluation_time,
+        ),
+        "initialized": False,
+    }
+
+
+def seconds_between(
+    newer_timestamp: str,
+    older_timestamp: str | None,
+) -> float:
+    newer = parse_utc_timestamp(newer_timestamp)
+    older = parse_utc_timestamp(older_timestamp)
+
+    if newer is None or older is None:
+        return 0.0
+
+    return max(0.0, (newer - older).total_seconds())
+
+
+def is_safety_reduction(
+    requested_mode: str,
+    applied_mode: str,
+    deterministic: Dict[str, Any],
+) -> bool:
+    return (
+        deterministic["fault_state_level"] >= 2
+        or deterministic["outputs_blocked"]
+        or (
+            deterministic["fault_state_level"] > 0
+            and mode_number(requested_mode) < mode_number(applied_mode)
+        )
+    )
+
+
+def stabilize_operating_mode(
+    requested_mode: str,
+    deterministic: Dict[str, Any],
+    previous_state: Dict[str, Any] | None,
+    evaluation_time: str,
+) -> Dict[str, Any]:
+    """
+    Cloud adaptation of the article v9 anti-chattering layer.
+
+    Unlike the ESP32 simulation, which advances in 5-minute steps, the cloud
+    receives telemetry more frequently. Therefore confirmation and dwell are
+    time-based: 10 minutes of persistent candidacy and 15 minutes since the
+    last applied-mode change. Safety reductions bypass both delays.
+    """
+    state = normalize_fis_state(
+        previous_state=previous_state,
+        requested_mode=requested_mode,
+        evaluation_time=evaluation_time,
+    )
+
+    applied_mode = state["applied_mode"]
+    candidate_mode = state["candidate_mode"]
+    candidate_since = state["candidate_since"]
+    last_mode_change_at = state["last_mode_change_at"]
+    initialized = state["initialized"]
+
+    safety_reduction = is_safety_reduction(
+        requested_mode=requested_mode,
+        applied_mode=applied_mode,
+        deterministic=deterministic,
+    )
+
+    mode_changed = False
+    command_required = initialized
+    decision_reason = "initialized_from_first_valid_decision"
+
+    if safety_reduction:
+        mode_changed = requested_mode != applied_mode
+        applied_mode = requested_mode
+        candidate_mode = requested_mode
+        candidate_since = None
+        last_mode_change_at = evaluation_time
+        command_required = command_required or mode_changed
+        decision_reason = "safety_reduction_applied_immediately"
+
+    elif requested_mode == applied_mode:
+        candidate_mode = requested_mode
+        candidate_since = None
+        if not initialized:
+            decision_reason = "requested_mode_matches_applied_mode"
+
+    elif requested_mode != candidate_mode or candidate_since is None:
+        candidate_mode = requested_mode
+        candidate_since = evaluation_time
+        decision_reason = "new_candidate_started"
+
+    else:
+        confirmation_elapsed = seconds_between(
+            evaluation_time,
+            candidate_since,
+        )
+        dwell_elapsed = seconds_between(
+            evaluation_time,
+            last_mode_change_at,
+        )
+
+        if (
+            confirmation_elapsed >= MODE_CONFIRMATION_SECONDS
+            and dwell_elapsed >= MIN_MODE_DWELL_SECONDS
+        ):
+            applied_mode = candidate_mode
+            candidate_since = None
+            last_mode_change_at = evaluation_time
+            mode_changed = True
+            command_required = True
+            decision_reason = "candidate_confirmed_and_dwell_satisfied"
+        elif confirmation_elapsed < MODE_CONFIRMATION_SECONDS:
+            decision_reason = "waiting_for_candidate_confirmation"
+        else:
+            decision_reason = "waiting_for_minimum_dwell"
+
+    confirmation_elapsed = (
+        seconds_between(evaluation_time, candidate_since)
+        if candidate_since
+        else 0.0
+    )
+    dwell_elapsed = seconds_between(
+        evaluation_time,
+        last_mode_change_at,
+    )
+
+    return {
+        "requested_mode": requested_mode,
+        "applied_mode": applied_mode,
+        "candidate_mode": candidate_mode,
+        "candidate_since": candidate_since,
+        "last_mode_change_at": last_mode_change_at,
+        "last_evaluation_at": evaluation_time,
+        "confirmation_elapsed_seconds": int(confirmation_elapsed),
+        "dwell_elapsed_seconds": int(dwell_elapsed),
+        "confirmation_required_seconds": MODE_CONFIRMATION_SECONDS,
+        "minimum_dwell_seconds": MIN_MODE_DWELL_SECONDS,
+        "safety_reduction": safety_reduction,
+        "mode_changed": mode_changed,
+        "command_required": command_required,
+        "decision_reason": decision_reason,
+    }
+
+
+def load_fis_state(station_id: str) -> Dict[str, Any] | None:
+    result = status_table.get_item(
+        Key={"station_id": station_id},
+        ConsistentRead=True,
+    )
+    item = result.get("Item", {})
+    state = item.get("fis_state")
+
+    if isinstance(state, dict):
+        return state
+
+    return None
+
+
+def save_fis_state(
+    station_id: str,
+    stabilization: Dict[str, Any],
+) -> None:
+    state = {
+        "applied_mode": stabilization["applied_mode"],
+        "candidate_mode": stabilization["candidate_mode"],
+        "candidate_since": stabilization["candidate_since"],
+        "last_mode_change_at": stabilization["last_mode_change_at"],
+        "last_evaluation_at": stabilization["last_evaluation_at"],
+    }
+
+    status_table.update_item(
+        Key={"station_id": station_id},
+        UpdateExpression=(
+            "SET fis_state = :fis_state, "
+            "cloud_requested_mode = :requested_mode, "
+            "cloud_operating_mode = :applied_mode, "
+            "cloud_mode_updated_at = :updated_at"
+        ),
+        ExpressionAttributeValues=convert_floats_to_decimal(
+            {
+                ":fis_state": state,
+                ":requested_mode": stabilization["requested_mode"],
+                ":applied_mode": stabilization["applied_mode"],
+                ":updated_at": stabilization["last_evaluation_at"],
+            }
+        ),
+    )
+
+
 def apply_cloud_side_validation(
     fis_mode: str,
     soc_percent: float,
@@ -703,23 +1003,27 @@ def mode_to_outputs(mode: str) -> int:
     return 0
 
 
-def build_command_request(payload: Dict[str, Any], fis_result: Dict[str, Any]) -> Dict[str, Any]:
+def build_command_request(
+    payload: Dict[str, Any],
+    fis_result: Dict[str, Any],
+) -> Dict[str, Any]:
     station_id = payload["station_id"]
     deterministic = fis_result["deterministic_validation"]
-    requested_mode = deterministic["requested_mode"]
-    outputs_active = fis_result["final_decision"]["outputs_active_request"]
+    final_decision = fis_result["final_decision"]
+    applied_mode = final_decision["operating_mode"]
+    outputs_active = final_decision["outputs_active"]
 
-    if requested_mode == "M0":
+    if applied_mode == "M0":
         command = "LOCKOUT"
-    elif requested_mode == "M1":
+    elif applied_mode == "M1":
         command = "STOP"
-    elif requested_mode == "M2":
+    elif applied_mode == "M2":
         command = "ENABLE_TRACKING"
-    elif requested_mode == "M3":
+    elif applied_mode == "M3":
         command = "ENABLE_OUTPUT_1"
-    elif requested_mode == "M4":
+    elif applied_mode == "M4":
         command = "ENABLE_OUTPUT_2"
-    elif requested_mode == "M5":
+    elif applied_mode == "M5":
         command = "ENABLE_OUTPUT_3"
     else:
         command = "STOP"
@@ -729,11 +1033,16 @@ def build_command_request(payload: Dict[str, Any], fis_result: Dict[str, Any]) -
         "command": command,
         "source": "cloud_fis",
         "parameters": {
-            "requested_mode": requested_mode,
+            "requested_mode": final_decision["requested_mode"],
+            "applied_mode": applied_mode,
             "max_outputs": outputs_active,
-            "tracking_allowed": deterministic["tracking_allowed"],
+            "tracking_allowed": (
+                deterministic["tracking_allowed"]
+                and mode_number(applied_mode) >= 2
+            ),
             "weather_index": fis_result["weather_fis_output"]["weather_index"],
             "fis_mode": fis_result["main_fis_output"]["fis_mode"],
+            "command_required": final_decision["command_required"],
         },
     }
 
@@ -758,13 +1067,9 @@ def build_fis_history_item(
     fis_result: Dict[str, Any],
     command_request: Dict[str, Any],
 ) -> Dict[str, Any]:
-    requested_mode = fis_result[
-        "deterministic_validation"
-    ]["requested_mode"]
-
-    outputs_active = fis_result[
-        "final_decision"
-    ]["outputs_active_request"]
+    requested_mode = fis_result["final_decision"]["requested_mode"]
+    applied_mode = fis_result["final_decision"]["operating_mode"]
+    outputs_active = fis_result["final_decision"]["outputs_active"]
 
     item: Dict[str, Any] = {
         "station_id": payload["station_id"],
@@ -801,9 +1106,14 @@ def build_fis_history_item(
                 "blocked_reasons"
             ],
         },
+        "mode_stabilization": fis_result["mode_stabilization"],
         "final_decision": {
-            "operating_mode": requested_mode,
+            "requested_mode": requested_mode,
+            "operating_mode": applied_mode,
             "outputs_active": outputs_active,
+            "command_required": fis_result["final_decision"][
+                "command_required"
+            ],
         },
         "command_request": command_request,
     }
