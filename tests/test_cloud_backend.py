@@ -163,6 +163,24 @@ class CommandDispatcherTests(unittest.TestCase):
         publish_command.assert_not_called()
         update_status.assert_not_called()
 
+    def test_cloud_fis_command_is_skipped_when_not_required(self):
+        payload = json.loads(json.dumps(self.payload))
+        payload["source"] = "cloud_fis"
+        payload.setdefault("parameters", {})["command_required"] = False
+
+        with (
+            patch.object(command, "save_command_to_dynamodb") as save_command,
+            patch.object(command, "publish_command_to_iot") as publish_command,
+            patch.object(command, "update_command_status") as update_status,
+        ):
+            result = command.lambda_handler(payload, None)
+
+        self.assertEqual(result["statusCode"], 200)
+        self.assertEqual(parse_lambda_body(result)["status"], "skipped")
+        save_command.assert_not_called()
+        publish_command.assert_not_called()
+        update_status.assert_not_called()
+
     def test_publish_failure_marks_command_as_failed(self):
         with (
             patch.object(command, "save_command_to_dynamodb") as save_command,
@@ -287,6 +305,11 @@ class FISProcessorTests(unittest.TestCase):
             ) as load_state,
             patch.object(
                 fis,
+                "invoke_command_dispatcher",
+                return_value={"status_code": 200, "body": {"status": "sent"}},
+            ) as invoke_dispatcher,
+            patch.object(
+                fis,
                 "save_fis_state",
             ) as save_state,
             patch.object(
@@ -303,7 +326,10 @@ class FISProcessorTests(unittest.TestCase):
             "FIS decision evaluated successfully",
         )
         load_state.assert_called_once_with("station_001")
+        invoke_dispatcher.assert_called_once()
         save_state.assert_called_once()
+        saved_stabilization = save_state.call_args.kwargs["stabilization"]
+        self.assertEqual(saved_stabilization["last_dispatched_mode"], "M4")
         save_decision.assert_called_once()
 
     def test_invalid_fis_event_returns_400_without_write(self):
@@ -463,6 +489,8 @@ class FISProcessorTests(unittest.TestCase):
             "candidate_since": "2026-08-04T00:00:00Z",
             "last_mode_change_at": "2026-08-04T00:00:00Z",
             "last_evaluation_at": "2026-08-04T00:00:00Z",
+            "last_dispatched_mode": "M2",
+            "last_dispatch_at": "2026-08-04T00:00:00Z",
         }
 
         waiting_confirmation = fis.stabilize_operating_mode(
@@ -511,6 +539,8 @@ class FISProcessorTests(unittest.TestCase):
             "candidate_since": "2026-08-04T00:05:00Z",
             "last_mode_change_at": "2026-08-04T00:00:00Z",
             "last_evaluation_at": "2026-08-04T00:05:00Z",
+            "last_dispatched_mode": "M4",
+            "last_dispatch_at": "2026-08-04T00:00:00Z",
         }
 
         result = fis.stabilize_operating_mode(
@@ -539,6 +569,8 @@ class FISProcessorTests(unittest.TestCase):
             "candidate_since": "2026-08-04T00:00:00Z",
             "last_mode_change_at": "2026-08-03T23:30:00Z",
             "last_evaluation_at": "2026-08-04T00:05:00Z",
+            "last_dispatched_mode": "M2",
+            "last_dispatch_at": "2026-08-04T00:00:00Z",
         }
 
         result = fis.stabilize_operating_mode(
@@ -560,6 +592,8 @@ class FISProcessorTests(unittest.TestCase):
             "candidate_since": None,
             "last_mode_change_at": "2026-08-04T00:00:00Z",
             "last_evaluation_at": "2026-08-04T00:00:00Z",
+            "last_dispatched_mode": "M2",
+            "last_dispatch_at": "2026-08-04T00:00:00Z",
         }
 
         fis_result = fis.evaluate_fis(
@@ -589,6 +623,60 @@ class FISProcessorTests(unittest.TestCase):
             "M2",
         )
 
+    def test_handler_does_not_dispatch_when_mode_was_already_sent(self):
+        previous_state = {
+            "applied_mode": "M4",
+            "candidate_mode": "M4",
+            "candidate_since": None,
+            "last_mode_change_at": "2026-08-04T00:00:00Z",
+            "last_evaluation_at": "2026-08-04T00:00:00Z",
+            "last_dispatched_mode": "M4",
+            "last_dispatch_at": "2026-08-04T00:00:00Z",
+        }
+
+        with (
+            patch.object(fis, "load_fis_state", return_value=previous_state),
+            patch.object(fis, "invoke_command_dispatcher") as invoke_dispatcher,
+            patch.object(fis, "save_fis_state") as save_state,
+            patch.object(fis, "save_fis_decision") as save_decision,
+        ):
+            result = fis.lambda_handler(self.payload, None)
+
+        self.assertEqual(result["statusCode"], 200)
+        body = parse_lambda_body(result)
+        self.assertEqual(body["dispatch_result"]["status"], "not_required")
+        invoke_dispatcher.assert_not_called()
+        save_state.assert_called_once()
+        save_decision.assert_called_once()
+
+    def test_dispatch_failure_keeps_command_pending_for_retry(self):
+        previous_state = {
+            "applied_mode": "M4",
+            "candidate_mode": "M4",
+            "candidate_since": None,
+            "last_mode_change_at": "2026-08-04T00:00:00Z",
+            "last_evaluation_at": "2026-08-04T00:00:00Z",
+            "last_dispatched_mode": "M2",
+            "last_dispatch_at": "2026-08-04T00:00:00Z",
+        }
+
+        with (
+            patch.object(fis, "load_fis_state", return_value=previous_state),
+            patch.object(
+                fis,
+                "invoke_command_dispatcher",
+                side_effect=RuntimeError("simulated dispatch failure"),
+            ),
+            patch.object(fis, "save_fis_state") as save_state,
+            patch.object(fis, "save_fis_decision") as save_decision,
+        ):
+            result = fis.lambda_handler(self.payload, None)
+
+        self.assertEqual(result["statusCode"], 502)
+        saved_stabilization = save_state.call_args.kwargs["stabilization"]
+        self.assertEqual(saved_stabilization["last_dispatched_mode"], "M2")
+        save_decision.assert_called_once()
+
     def test_save_fis_state_updates_station_status(self):
         stabilization = {
             "requested_mode": "M4",
@@ -597,6 +685,8 @@ class FISProcessorTests(unittest.TestCase):
             "candidate_since": "2026-08-04T00:01:00Z",
             "last_mode_change_at": "2026-08-04T00:00:00Z",
             "last_evaluation_at": "2026-08-04T00:01:00Z",
+            "last_dispatched_mode": "M2",
+            "last_dispatch_at": "2026-08-04T00:00:00Z",
         }
 
         with patch.object(

@@ -57,6 +57,17 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 },
             )
 
+        if should_skip_command(payload):
+            return response(
+                status_code=200,
+                body={
+                    "message": "Command skipped because no mode change is required",
+                    "station_id": payload["station_id"],
+                    "command": payload["command"],
+                    "status": "skipped",
+                },
+            )
+
         command_payload = build_command_payload(payload)
         topic = f"station/{command_payload['station_id']}/commands"
 
@@ -140,6 +151,14 @@ def validate_command(payload: Dict[str, Any]) -> List[str]:
 
     return errors
 
+
+
+def should_skip_command(payload: Dict[str, Any]) -> bool:
+    if payload.get("source") != "cloud_fis":
+        return False
+
+    parameters = payload.get("parameters", {})
+    return parameters.get("command_required") is False
 
 def build_command_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

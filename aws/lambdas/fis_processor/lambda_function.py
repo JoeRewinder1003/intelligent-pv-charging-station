@@ -21,7 +21,12 @@ STATUS_TABLE_NAME = os.environ.get(
 fis_decision_table = dynamodb.Table(FIS_DECISION_TABLE_NAME)
 status_table = dynamodb.Table(STATUS_TABLE_NAME)
 
-FIS_IMPLEMENTATION_VERSION = "article_v9_stateful_v1"
+FIS_IMPLEMENTATION_VERSION = "article_v9_dispatch_v1"
+
+COMMAND_DISPATCHER_FUNCTION_NAME = os.environ.get(
+    "COMMAND_DISPATCHER_FUNCTION_NAME",
+    "command_dispatcher",
+)
 
 MODE_CONFIRMATION_SECONDS = int(
     os.environ.get("MODE_CONFIRMATION_SECONDS", "600")
@@ -42,16 +47,13 @@ OPERATING_MODES = {
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
-    Evaluates the cloud-side fuzzy decision system.
+    Evaluates the cloud-side fuzzy decision system and conditionally invokes
+    command_dispatcher.
 
-    This first version:
-    - receives a telemetry-like payload,
-    - estimates Weather Index,
-    - evaluates the Main FIS,
-    - returns a cloud-side command request.
-
-    It does not publish MQTT commands yet. That will be handled by
-    command_dispatcher in a later integration step.
+    A command is dispatched only when the stabilized operating mode differs
+    from the last mode successfully sent to the station. If dispatch fails,
+    the state keeps the previous last-dispatched mode so the next evaluation
+    retries the command instead of silently losing it.
     """
 
     try:
@@ -78,15 +80,56 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         )
         command_request = build_command_request(payload, fis_result)
 
+        dispatch_result = {
+            "attempted": False,
+            "status": "not_required",
+        }
+        stabilization_to_save = dict(fis_result["mode_stabilization"])
+        dispatch_error = None
+
+        if fis_result["final_decision"]["command_required"]:
+            try:
+                dispatcher_response = invoke_command_dispatcher(
+                    command_request
+                )
+                dispatch_result = {
+                    "attempted": True,
+                    "status": "sent",
+                    "response": dispatcher_response,
+                }
+                stabilization_to_save = mark_command_dispatched(
+                    stabilization=stabilization_to_save,
+                    dispatch_timestamp=evaluation_time,
+                )
+            except Exception as exc:
+                dispatch_error = exc
+                dispatch_result = {
+                    "attempted": True,
+                    "status": "failed",
+                    "error": str(exc),
+                }
+
         save_fis_state(
             station_id=station_id,
-            stabilization=fis_result["mode_stabilization"],
+            stabilization=stabilization_to_save,
         )
         save_fis_decision(
             payload=payload,
             fis_result=fis_result,
             command_request=command_request,
+            dispatch_result=dispatch_result,
         )
+
+        if dispatch_error is not None:
+            return response(
+                502,
+                {
+                    "message": "FIS decision evaluated but command dispatch failed",
+                    "fis_result": fis_result,
+                    "command_request": command_request,
+                    "dispatch_result": dispatch_result,
+                },
+            )
 
         return response(
             200,
@@ -94,6 +137,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "message": "FIS decision evaluated successfully",
                 "fis_result": fis_result,
                 "command_request": command_request,
+                "dispatch_result": dispatch_result,
             },
         )
 
@@ -736,6 +780,8 @@ def default_fis_state(
         "candidate_since": None,
         "last_mode_change_at": evaluation_time,
         "last_evaluation_at": evaluation_time,
+        "last_dispatched_mode": None,
+        "last_dispatch_at": None,
         "initialized": True,
     }
 
@@ -765,6 +811,14 @@ def normalize_fis_state(
     if parse_utc_timestamp(candidate_since) is None:
         candidate_since = None
 
+    last_dispatched_mode = previous_state.get("last_dispatched_mode")
+    if last_dispatched_mode not in OPERATING_MODES.values():
+        last_dispatched_mode = None
+
+    last_dispatch_at = previous_state.get("last_dispatch_at")
+    if parse_utc_timestamp(last_dispatch_at) is None:
+        last_dispatch_at = None
+
     return {
         "applied_mode": applied_mode,
         "candidate_mode": candidate_mode,
@@ -774,6 +828,8 @@ def normalize_fis_state(
             "last_evaluation_at",
             evaluation_time,
         ),
+        "last_dispatched_mode": last_dispatched_mode,
+        "last_dispatch_at": last_dispatch_at,
         "initialized": False,
     }
 
@@ -830,6 +886,8 @@ def stabilize_operating_mode(
     candidate_mode = state["candidate_mode"]
     candidate_since = state["candidate_since"]
     last_mode_change_at = state["last_mode_change_at"]
+    last_dispatched_mode = state["last_dispatched_mode"]
+    last_dispatch_at = state["last_dispatch_at"]
     initialized = state["initialized"]
 
     safety_reduction = is_safety_reduction(
@@ -839,7 +897,6 @@ def stabilize_operating_mode(
     )
 
     mode_changed = False
-    command_required = initialized
     decision_reason = "initialized_from_first_valid_decision"
 
     if safety_reduction:
@@ -848,7 +905,6 @@ def stabilize_operating_mode(
         candidate_mode = requested_mode
         candidate_since = None
         last_mode_change_at = evaluation_time
-        command_required = command_required or mode_changed
         decision_reason = "safety_reduction_applied_immediately"
 
     elif requested_mode == applied_mode:
@@ -880,7 +936,6 @@ def stabilize_operating_mode(
             candidate_since = None
             last_mode_change_at = evaluation_time
             mode_changed = True
-            command_required = True
             decision_reason = "candidate_confirmed_and_dwell_satisfied"
         elif confirmation_elapsed < MODE_CONFIRMATION_SECONDS:
             decision_reason = "waiting_for_candidate_confirmation"
@@ -897,6 +952,8 @@ def stabilize_operating_mode(
         last_mode_change_at,
     )
 
+    command_required = applied_mode != last_dispatched_mode
+
     return {
         "requested_mode": requested_mode,
         "applied_mode": applied_mode,
@@ -904,6 +961,8 @@ def stabilize_operating_mode(
         "candidate_since": candidate_since,
         "last_mode_change_at": last_mode_change_at,
         "last_evaluation_at": evaluation_time,
+        "last_dispatched_mode": last_dispatched_mode,
+        "last_dispatch_at": last_dispatch_at,
         "confirmation_elapsed_seconds": int(confirmation_elapsed),
         "dwell_elapsed_seconds": int(dwell_elapsed),
         "confirmation_required_seconds": MODE_CONFIRMATION_SECONDS,
@@ -939,6 +998,10 @@ def save_fis_state(
         "candidate_since": stabilization["candidate_since"],
         "last_mode_change_at": stabilization["last_mode_change_at"],
         "last_evaluation_at": stabilization["last_evaluation_at"],
+        "last_dispatched_mode": stabilization.get(
+            "last_dispatched_mode"
+        ),
+        "last_dispatch_at": stabilization.get("last_dispatch_at"),
     }
 
     status_table.update_item(
@@ -959,6 +1022,59 @@ def save_fis_state(
         ),
     )
 
+
+
+def mark_command_dispatched(
+    stabilization: Dict[str, Any],
+    dispatch_timestamp: str,
+) -> Dict[str, Any]:
+    updated = dict(stabilization)
+    updated["last_dispatched_mode"] = stabilization["applied_mode"]
+    updated["last_dispatch_at"] = dispatch_timestamp
+    return updated
+
+
+def invoke_command_dispatcher(
+    command_request: Dict[str, Any],
+) -> Dict[str, Any]:
+    lambda_client = boto3.client("lambda")
+    invoke_result = lambda_client.invoke(
+        FunctionName=COMMAND_DISPATCHER_FUNCTION_NAME,
+        InvocationType="RequestResponse",
+        Payload=json.dumps(command_request).encode("utf-8"),
+    )
+
+    payload_stream = invoke_result.get("Payload")
+    raw_payload = payload_stream.read() if payload_stream else b"{}"
+    if isinstance(raw_payload, bytes):
+        raw_payload = raw_payload.decode("utf-8")
+
+    downstream_result = json.loads(raw_payload or "{}")
+
+    if invoke_result.get("FunctionError"):
+        raise RuntimeError(
+            "command_dispatcher Lambda execution failed: "
+            + json.dumps(downstream_result)
+        )
+
+    status_code = downstream_result.get("statusCode", 500)
+    if status_code >= 400:
+        raise RuntimeError(
+            "command_dispatcher returned an error: "
+            + json.dumps(downstream_result)
+        )
+
+    body = downstream_result.get("body")
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except json.JSONDecodeError:
+            pass
+
+    return {
+        "status_code": status_code,
+        "body": body,
+    }
 
 def apply_cloud_side_validation(
     fis_mode: str,
@@ -1050,11 +1166,13 @@ def save_fis_decision(
     payload: Dict[str, Any],
     fis_result: Dict[str, Any],
     command_request: Dict[str, Any],
+    dispatch_result: Dict[str, Any] | None = None,
 ) -> None:
     item = build_fis_history_item(
         payload=payload,
         fis_result=fis_result,
         command_request=command_request,
+        dispatch_result=dispatch_result,
     )
 
     fis_decision_table.put_item(
@@ -1066,6 +1184,7 @@ def build_fis_history_item(
     payload: Dict[str, Any],
     fis_result: Dict[str, Any],
     command_request: Dict[str, Any],
+    dispatch_result: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     requested_mode = fis_result["final_decision"]["requested_mode"]
     applied_mode = fis_result["final_decision"]["operating_mode"]
@@ -1116,6 +1235,10 @@ def build_fis_history_item(
             ],
         },
         "command_request": command_request,
+        "dispatch_result": dispatch_result or {
+            "attempted": False,
+            "status": "not_available",
+        },
     }
 
     input_timestamp = payload.get("timestamp")
