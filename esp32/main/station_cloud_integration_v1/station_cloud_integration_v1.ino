@@ -4,8 +4,10 @@
 #include <ArduinoJson.h>
 #include <time.h>
 #include <string.h>
+#include <math.h>
 
 #include "secrets.h"
+#include "BatteryEmulator.h"
 
 /*
  * AWS IoT connectivity and local command-validation test.
@@ -13,7 +15,8 @@
  * This firmware:
  * - Connects the ESP32 to Wi-Fi and AWS IoT Core.
  * - Synchronizes UTC time with NTP.
- * - Publishes test telemetry every 15 seconds.
+ * - Emulates a configurable GEL lead-acid battery bank.
+ * - Publishes dynamic test telemetry every 15 seconds.
  * - Receives cloud commands.
  * - Classifies commands as accepted, invalid_command, or
  *   blocked_by_safety.
@@ -43,12 +46,20 @@ static constexpr char ACK_TOPIC[] =
 
 static constexpr uint16_t MQTT_PORT = 8883;
 static constexpr unsigned long TELEMETRY_INTERVAL_MS = 15000;
+static constexpr unsigned long BATTERY_UPDATE_INTERVAL_MS = 1000;
 static constexpr unsigned long MQTT_RETRY_INTERVAL_MS = 5000;
 static constexpr unsigned long ACK_RETRY_INTERVAL_MS = 2000;
 static constexpr time_t MIN_VALID_EPOCH = 1704067200;  // 2024-01-01 UTC
 
 static constexpr char NORMAL_TEST_MODE[] = "M4";
+static constexpr char RESTRICTED_TEST_MODE[] = "M2";
 static constexpr char LOCKOUT_TEST_MODE[] = "M0";
+
+// Static station values used only during the first battery-emulator test.
+static constexpr float TEST_PV_POWER_W = 245.5f;
+static constexpr float BASE_LOAD_POWER_W = 5.0f;
+static constexpr float SCOOTER_USEFUL_POWER_W = 71.0f;
+static constexpr float BOOST_EFFICIENCY = 0.88f;
 
 // ============================================================
 // MQTT and TLS clients
@@ -62,9 +73,17 @@ PubSubClient mqttClient(secureClient);
 // ============================================================
 
 unsigned long lastTelemetryMs = 0;
+unsigned long lastBatteryUpdateMs = 0;
 unsigned long lastMqttAttemptMs = 0;
 unsigned long lastAckAttemptMs = 0;
 uint32_t telemetryCounter = 0;
+
+BatteryConfig batteryConfig;
+BatteryEmulator batteryEmulator(batteryConfig);
+
+bool manualBatteryPowerOverride = false;
+float manualBatteryPowerW = 0.0f;
+float batteryTimeScale = 1.0f;
 
 /*
  * Simulated safety state used only for this validation test.
@@ -114,12 +133,18 @@ void configureTls();
 void synchronizeTime();
 void connectMqtt();
 void processSerialCommands();
+void printSerialHelp();
 void printSimulatedSafetyState();
+void printBatteryStatus();
+void updateBatteryEmulator();
 
 bool getUtcTimestamp(char* buffer, size_t bufferSize);
 bool isAllowedCommand(const char* command);
 bool isSafetyReducingCommand(const char* command);
 bool copyText(char* destination, size_t destinationSize, const char* source);
+bool isCriticalSafetyActive();
+bool batteryOutputsAllowed();
+float calculateAutomaticBatteryPowerW();
 const char* currentTestOperatingMode();
 
 void publishTelemetry();
@@ -143,10 +168,14 @@ void setup() {
 
   Serial.println();
   Serial.println("========================================");
-  Serial.println("AWS IoT local command-validation test");
+  Serial.println("AWS IoT + battery-emulator validation test");
   Serial.println("No physical outputs will be activated.");
-  Serial.println("Serial commands: SAFETY ON, SAFETY OFF, STATUS");
   Serial.println("========================================");
+  printSerialHelp();
+
+  batteryEmulator.begin();
+  lastBatteryUpdateMs = millis();
+  printBatteryStatus();
 
   connectWiFi();
 
@@ -173,6 +202,7 @@ void setup() {
 
 void loop() {
   processSerialCommands();
+  updateBatteryEmulator();
 
   if (WiFi.status() != WL_CONNECTED) {
     connectWiFi();
@@ -389,20 +419,189 @@ void processSerialCommands() {
 
   if (serialCommand == "STATUS") {
     printSimulatedSafetyState();
+    printBatteryStatus();
+    return;
+  }
+
+  if (serialCommand == "HELP") {
+    printSerialHelp();
+    return;
+  }
+
+  if (serialCommand == "BATTERY STATUS") {
+    printBatteryStatus();
+    return;
+  }
+
+  if (serialCommand == "BATTERY AUTO") {
+    manualBatteryPowerOverride = false;
+    Serial.println("Battery power returned to automatic station balance.");
+    printBatteryStatus();
+    return;
+  }
+
+  if (serialCommand.startsWith("BATTERY POWER ")) {
+    const float requestedPowerW =
+        serialCommand.substring(strlen("BATTERY POWER ")).toFloat();
+
+    if (!isfinite(requestedPowerW) ||
+        requestedPowerW < -1000.0f ||
+        requestedPowerW > 1000.0f) {
+      Serial.println("Invalid battery power. Allowed range: -1000 to 1000 W.");
+      return;
+    }
+
+    manualBatteryPowerW = requestedPowerW;
+    manualBatteryPowerOverride = true;
+
+    Serial.printf(
+        "Manual battery power set to %.2f W (%s).\n",
+        manualBatteryPowerW,
+        manualBatteryPowerW >= 0.0f ? "charging" : "discharging"
+    );
+    return;
+  }
+
+  if (serialCommand.startsWith("BATTERY SOC ")) {
+    const float requestedSoc =
+        serialCommand.substring(strlen("BATTERY SOC ")).toFloat();
+
+    if (!isfinite(requestedSoc) ||
+        requestedSoc < 0.0f ||
+        requestedSoc > 100.0f) {
+      Serial.println("Invalid SOC. Allowed range: 0 to 100 percent.");
+      return;
+    }
+
+    batteryEmulator.setSocPercent(requestedSoc);
+    Serial.printf("Battery SOC set to %.2f%%.\n", requestedSoc);
+    printBatteryStatus();
+    return;
+  }
+
+  if (serialCommand.startsWith("BATTERY SCALE ")) {
+    const float requestedScale =
+        serialCommand.substring(strlen("BATTERY SCALE ")).toFloat();
+
+    if (!isfinite(requestedScale) ||
+        requestedScale < 1.0f ||
+        requestedScale > 3600.0f) {
+      Serial.println("Invalid time scale. Allowed range: 1 to 3600.");
+      return;
+    }
+
+    batteryTimeScale = requestedScale;
+    Serial.printf("Battery emulation time scale set to x%.1f.\n", batteryTimeScale);
     return;
   }
 
   Serial.println("Unknown serial command.");
-  Serial.println("Use: SAFETY ON, SAFETY OFF, or STATUS");
+  printSerialHelp();
+}
+
+void printSerialHelp() {
+  Serial.println("Serial commands:");
+  Serial.println("  STATUS");
+  Serial.println("  SAFETY ON");
+  Serial.println("  SAFETY OFF");
+  Serial.println("  BATTERY STATUS");
+  Serial.println("  BATTERY AUTO");
+  Serial.println("  BATTERY POWER <watts>");
+  Serial.println("  BATTERY SOC <0-100>");
+  Serial.println("  BATTERY SCALE <1-3600>");
+  Serial.println("  HELP");
 }
 
 void printSimulatedSafetyState() {
-  Serial.print("Simulated safety state: ");
+  Serial.print("Manual simulated safety state: ");
   Serial.println(
       simulatedCriticalLockout ? "CRITICAL_LOCKOUT" : "NORMAL"
   );
+  Serial.print("Combined local safety state: ");
+  Serial.println(isCriticalSafetyActive() ? "CRITICAL" : "NON_CRITICAL");
   Serial.print("Test operating mode: ");
   Serial.println(currentTestOperatingMode());
+}
+
+void printBatteryStatus() {
+  const BatteryState& battery = batteryEmulator.state();
+
+  Serial.println();
+  Serial.println("Battery emulator status:");
+  Serial.printf(
+      "  Bank: %u x %.0f Ah, %.0f Wh nominal\n",
+      batteryEmulator.config().batteryCount,
+      batteryEmulator.config().capacityAhPerBattery,
+      batteryEmulator.nominalEnergyWh()
+  );
+  Serial.printf("  SOC: %.3f%%\n", battery.socPercent);
+  Serial.printf("  OCV: %.3f V\n", battery.openCircuitVoltageV);
+  Serial.printf("  Terminal voltage: %.3f V\n", battery.terminalVoltageV);
+  Serial.printf("  Current: %.3f A\n", battery.currentA);
+  Serial.printf("  Power: %.3f W\n", battery.powerW);
+  Serial.printf(
+      "  Protection: %s\n",
+      batteryEmulator.protectionStateText()
+  );
+  Serial.printf(
+      "  Power source: %s\n",
+      manualBatteryPowerOverride ? "MANUAL" : "AUTOMATIC_BALANCE"
+  );
+  Serial.printf("  Time scale: x%.1f\n", batteryTimeScale);
+  Serial.printf(
+      "  Flags: normal_limit=%s, overcurrent=%s, undervoltage=%s\n",
+      battery.normalCurrentExceeded ? "true" : "false",
+      battery.overcurrent ? "true" : "false",
+      battery.undervoltage ? "true" : "false"
+  );
+  Serial.println();
+}
+
+void updateBatteryEmulator() {
+  const unsigned long now = millis();
+  const unsigned long elapsedMs = now - lastBatteryUpdateMs;
+
+  if (elapsedMs < BATTERY_UPDATE_INTERVAL_MS) {
+    return;
+  }
+
+  lastBatteryUpdateMs = now;
+
+  const float batteryPowerW = manualBatteryPowerOverride
+      ? manualBatteryPowerW
+      : calculateAutomaticBatteryPowerW();
+
+  const float simulatedDeltaTimeSeconds =
+      (static_cast<float>(elapsedMs) / 1000.0f) * batteryTimeScale;
+
+  batteryEmulator.update(
+      batteryPowerW,
+      simulatedDeltaTimeSeconds
+  );
+}
+
+bool isCriticalSafetyActive() {
+  return simulatedCriticalLockout || batteryEmulator.isCritical();
+}
+
+bool batteryOutputsAllowed() {
+  return !simulatedCriticalLockout &&
+         !batteryEmulator.isCritical() &&
+         !batteryEmulator.isRestricted();
+}
+
+float calculateAutomaticBatteryPowerW() {
+  const bool outputsEnabled = batteryOutputsAllowed();
+  const uint8_t activeOutputCount = outputsEnabled ? 2 : 0;
+
+  const float outputInputPowerW =
+      activeOutputCount *
+      (SCOOTER_USEFUL_POWER_W / BOOST_EFFICIENCY);
+
+  // Positive battery power means charging; negative means discharging.
+  return TEST_PV_POWER_W -
+         BASE_LOAD_POWER_W -
+         outputInputPowerW;
 }
 
 // ============================================================
@@ -454,9 +653,15 @@ bool copyText(
 }
 
 const char* currentTestOperatingMode() {
-  return simulatedCriticalLockout
-      ? LOCKOUT_TEST_MODE
-      : NORMAL_TEST_MODE;
+  if (isCriticalSafetyActive()) {
+    return LOCKOUT_TEST_MODE;
+  }
+
+  if (batteryEmulator.isRestricted()) {
+    return RESTRICTED_TEST_MODE;
+  }
+
+  return NORMAL_TEST_MODE;
 }
 
 // ============================================================
@@ -478,16 +683,19 @@ void publishTelemetry() {
 
   telemetryCounter++;
 
-  const bool trackingEnabled = !simulatedCriticalLockout;
-  const bool output1Active = !simulatedCriticalLockout;
-  const bool output2Active = !simulatedCriticalLockout;
+  const BatteryState& battery = batteryEmulator.state();
+
+  const bool trackingEnabled = !isCriticalSafetyActive();
+  const bool outputsAllowed = batteryOutputsAllowed();
+  const bool output1Active = outputsAllowed;
+  const bool output2Active = outputsAllowed;
   const bool output3Active = false;
-  const char* faultState = simulatedCriticalLockout
+  const char* faultState = isCriticalSafetyActive()
       ? "critical_lockout"
       : "normal";
   const char* operatingMode = currentTestOperatingMode();
 
-  char payload[1800];
+  char payload[1900];
 
   const int written = snprintf(
       payload,
@@ -496,10 +704,15 @@ void publishTelemetry() {
         "\"station_id\":\"%s\","
         "\"timestamp\":\"%s\","
         "\"battery\":{"
-          "\"voltage_v\":12.7,"
-          "\"current_a\":-5.2,"
-          "\"power_w\":-66.0,"
-          "\"soc_percent\":92.5"
+          "\"voltage_v\":%.3f,"
+          "\"current_a\":%.3f,"
+          "\"power_w\":%.3f,"
+          "\"soc_percent\":%.3f,"
+          "\"ocv_v\":%.3f,"
+          "\"protection_state\":\"%s\","
+          "\"normal_current_exceeded\":%s,"
+          "\"overcurrent\":%s,"
+          "\"undervoltage\":%s"
         "},"
         "\"pv\":{"
           "\"voltage_v\":19.8,"
@@ -536,10 +749,19 @@ void publishTelemetry() {
         "},"
         "\"fault_state\":\"%s\","
         "\"test_counter\":%lu,"
-        "\"source\":\"esp32_local_command_validation_test\""
+        "\"source\":\"esp32_battery_emulator_v1\""
       "}",
       AWS_IOT_CLIENT_ID,
       timestamp,
+      battery.terminalVoltageV,
+      battery.currentA,
+      battery.powerW,
+      battery.socPercent,
+      battery.openCircuitVoltageV,
+      batteryEmulator.protectionStateText(),
+      battery.normalCurrentExceeded ? "true" : "false",
+      battery.overcurrent ? "true" : "false",
+      battery.undervoltage ? "true" : "false",
       output1Active ? "true" : "false",
       output2Active ? "true" : "false",
       output3Active ? "true" : "false",
@@ -664,12 +886,12 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
-  if (simulatedCriticalLockout && !isSafetyReducingCommand(command)) {
+  if (isCriticalSafetyActive() && !isSafetyReducingCommand(command)) {
     prepareCommandAck(
         commandId,
         command,
         "blocked_by_safety",
-        "Command blocked by simulated local critical lockout; no physical action executed."
+        "Command blocked by a local critical safety condition; no physical action executed."
     );
     return;
   }
