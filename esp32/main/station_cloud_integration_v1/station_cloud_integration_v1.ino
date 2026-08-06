@@ -8,6 +8,7 @@
 
 #include "secrets.h"
 #include "BatteryEmulator.h"
+#include "ScenarioManager.h"
 
 /*
  * AWS IoT connectivity and local command-validation test.
@@ -15,6 +16,7 @@
  * This firmware:
  * - Connects the ESP32 to Wi-Fi and AWS IoT Core.
  * - Synchronizes UTC time with NTP.
+ * - Runs a functional station simulation through reproducible scenarios.
  * - Emulates a configurable GEL lead-acid battery bank.
  * - Publishes dynamic test telemetry every 15 seconds.
  * - Receives cloud commands.
@@ -51,12 +53,10 @@ static constexpr unsigned long MQTT_RETRY_INTERVAL_MS = 5000;
 static constexpr unsigned long ACK_RETRY_INTERVAL_MS = 2000;
 static constexpr time_t MIN_VALID_EPOCH = 1704067200;  // 2024-01-01 UTC
 
-static constexpr char NORMAL_TEST_MODE[] = "M4";
 static constexpr char RESTRICTED_TEST_MODE[] = "M2";
 static constexpr char LOCKOUT_TEST_MODE[] = "M0";
 
-// Static station values used only during the first battery-emulator test.
-static constexpr float TEST_PV_POWER_W = 245.5f;
+// Simplified functional-simulation constants.
 static constexpr float BASE_LOAD_POWER_W = 5.0f;
 static constexpr float SCOOTER_USEFUL_POWER_W = 71.0f;
 static constexpr float BOOST_EFFICIENCY = 0.88f;
@@ -80,6 +80,7 @@ uint32_t telemetryCounter = 0;
 
 BatteryConfig batteryConfig;
 BatteryEmulator batteryEmulator(batteryConfig);
+ScenarioManager scenarioManager;
 
 bool manualBatteryPowerOverride = false;
 float manualBatteryPowerW = 0.0f;
@@ -136,6 +137,8 @@ void processSerialCommands();
 void printSerialHelp();
 void printSimulatedSafetyState();
 void printBatteryStatus();
+void printScenarioStatus();
+void applyScenarioInitialConditions();
 void updateBatteryEmulator();
 
 bool getUtcTimestamp(char* buffer, size_t bufferSize);
@@ -146,6 +149,7 @@ bool isCriticalSafetyActive();
 bool batteryOutputsAllowed();
 float calculateAutomaticBatteryPowerW();
 const char* currentTestOperatingMode();
+const char* currentFaultState();
 
 void publishTelemetry();
 void publishPendingCommandAck();
@@ -168,13 +172,16 @@ void setup() {
 
   Serial.println();
   Serial.println("========================================");
-  Serial.println("AWS IoT + battery-emulator validation test");
+  Serial.println("AWS IoT + functional simulation validation");
   Serial.println("No physical outputs will be activated.");
   Serial.println("========================================");
   printSerialHelp();
 
   batteryEmulator.begin();
+  scenarioManager.begin(ScenarioType::CLEAR_DAY);
+  applyScenarioInitialConditions();
   lastBatteryUpdateMs = millis();
+  printScenarioStatus();
   printBatteryStatus();
 
   connectWiFi();
@@ -403,6 +410,34 @@ void processSerialCommands() {
     return;
   }
 
+  if (serialCommand == "SCENARIO STATUS") {
+    printScenarioStatus();
+    return;
+  }
+
+  if (serialCommand.startsWith("SCENARIO ")) {
+    const String scenarioName =
+        serialCommand.substring(strlen("SCENARIO "));
+
+    if (!scenarioManager.setScenarioByName(scenarioName.c_str())) {
+      Serial.println("Invalid scenario name.");
+      Serial.println(
+          "Allowed scenarios: CLEAR_DAY, CLOUDY_DAY, LOW_BATTERY, "
+          "HIGH_DEMAND, FAULT_EVENT, TRACKING_FAULT, STALE_DATA."
+      );
+      return;
+    }
+
+    applyScenarioInitialConditions();
+    Serial.printf(
+        "Scenario changed to %s.\n",
+        scenarioManager.scenarioName()
+    );
+    printScenarioStatus();
+    printBatteryStatus();
+    return;
+  }
+
   if (serialCommand == "SAFETY ON") {
     simulatedCriticalLockout = true;
     Serial.println("Simulated critical safety lockout ENABLED.");
@@ -419,6 +454,7 @@ void processSerialCommands() {
 
   if (serialCommand == "STATUS") {
     printSimulatedSafetyState();
+    printScenarioStatus();
     printBatteryStatus();
     return;
   }
@@ -502,6 +538,14 @@ void processSerialCommands() {
 void printSerialHelp() {
   Serial.println("Serial commands:");
   Serial.println("  STATUS");
+  Serial.println("  SCENARIO STATUS");
+  Serial.println("  SCENARIO CLEAR_DAY");
+  Serial.println("  SCENARIO CLOUDY_DAY");
+  Serial.println("  SCENARIO LOW_BATTERY");
+  Serial.println("  SCENARIO HIGH_DEMAND");
+  Serial.println("  SCENARIO FAULT_EVENT");
+  Serial.println("  SCENARIO TRACKING_FAULT");
+  Serial.println("  SCENARIO STALE_DATA");
   Serial.println("  SAFETY ON");
   Serial.println("  SAFETY OFF");
   Serial.println("  BATTERY STATUS");
@@ -557,6 +601,46 @@ void printBatteryStatus() {
   Serial.println();
 }
 
+void printScenarioStatus() {
+  const ScenarioProfile& profile = scenarioManager.profile();
+
+  Serial.println();
+  Serial.println("Functional simulation scenario:");
+  Serial.printf("  Name: %s\n", scenarioManager.scenarioName());
+  Serial.printf(
+      "  Elapsed simulated time: %.1f s\n",
+      scenarioManager.elapsedSimulatedSeconds()
+  );
+  Serial.printf("  Initial SOC: %.1f%%\n", profile.initialSocPercent);
+  Serial.printf("  Irradiance: %.1f W/m2\n", profile.irradianceWm2);
+  Serial.printf("  PV power: %.1f W\n", profile.pvPowerW);
+  Serial.printf("  Demand index: %.2f\n", profile.demandIndex);
+  Serial.printf("  Weather index: %.2f\n", profile.weatherIndex);
+  Serial.printf(
+      "  Requested outputs: %u\n",
+      static_cast<unsigned int>(profile.requestedOutputCount)
+  );
+  Serial.printf(
+      "  Nominal operating mode: %s\n",
+      profile.nominalOperatingMode
+  );
+  Serial.printf(
+      "  Scenario flags: critical_fault=%s, tracking_fault=%s, "
+      "stale_data=%s\n",
+      profile.criticalFault ? "true" : "false",
+      profile.trackingFault ? "true" : "false",
+      profile.staleData ? "true" : "false"
+  );
+  Serial.println();
+}
+
+void applyScenarioInitialConditions() {
+  batteryEmulator.setSocPercent(
+      scenarioManager.profile().initialSocPercent
+  );
+  manualBatteryPowerOverride = false;
+}
+
 void updateBatteryEmulator() {
   const unsigned long now = millis();
   const unsigned long elapsedMs = now - lastBatteryUpdateMs;
@@ -567,12 +651,14 @@ void updateBatteryEmulator() {
 
   lastBatteryUpdateMs = now;
 
+  const float simulatedDeltaTimeSeconds =
+      (static_cast<float>(elapsedMs) / 1000.0f) * batteryTimeScale;
+
+  scenarioManager.update(simulatedDeltaTimeSeconds);
+
   const float batteryPowerW = manualBatteryPowerOverride
       ? manualBatteryPowerW
       : calculateAutomaticBatteryPowerW();
-
-  const float simulatedDeltaTimeSeconds =
-      (static_cast<float>(elapsedMs) / 1000.0f) * batteryTimeScale;
 
   batteryEmulator.update(
       batteryPowerW,
@@ -581,25 +667,28 @@ void updateBatteryEmulator() {
 }
 
 bool isCriticalSafetyActive() {
-  return simulatedCriticalLockout || batteryEmulator.isCritical();
+  return simulatedCriticalLockout ||
+         batteryEmulator.isCritical() ||
+         scenarioManager.isCriticalFaultActive();
 }
 
 bool batteryOutputsAllowed() {
-  return !simulatedCriticalLockout &&
-         !batteryEmulator.isCritical() &&
+  return !isCriticalSafetyActive() &&
          !batteryEmulator.isRestricted();
 }
 
 float calculateAutomaticBatteryPowerW() {
   const bool outputsEnabled = batteryOutputsAllowed();
-  const uint8_t activeOutputCount = outputsEnabled ? 2 : 0;
+  const uint8_t activeOutputCount = outputsEnabled
+      ? scenarioManager.profile().requestedOutputCount
+      : 0;
 
   const float outputInputPowerW =
       activeOutputCount *
       (SCOOTER_USEFUL_POWER_W / BOOST_EFFICIENCY);
 
   // Positive battery power means charging; negative means discharging.
-  return TEST_PV_POWER_W -
+  return scenarioManager.profile().pvPowerW -
          BASE_LOAD_POWER_W -
          outputInputPowerW;
 }
@@ -661,7 +750,15 @@ const char* currentTestOperatingMode() {
     return RESTRICTED_TEST_MODE;
   }
 
-  return NORMAL_TEST_MODE;
+  return scenarioManager.nominalOperatingMode();
+}
+
+const char* currentFaultState() {
+  if (isCriticalSafetyActive()) {
+    return "critical_lockout";
+  }
+
+  return scenarioManager.faultStateText();
 }
 
 // ============================================================
@@ -684,18 +781,23 @@ void publishTelemetry() {
   telemetryCounter++;
 
   const BatteryState& battery = batteryEmulator.state();
+  const ScenarioProfile& scenario = scenarioManager.profile();
 
-  const bool trackingEnabled = !isCriticalSafetyActive();
+  const bool trackingEnabled =
+      !isCriticalSafetyActive() &&
+      !scenarioManager.isTrackingFaultActive();
   const bool outputsAllowed = batteryOutputsAllowed();
-  const bool output1Active = outputsAllowed;
-  const bool output2Active = outputsAllowed;
-  const bool output3Active = false;
-  const char* faultState = isCriticalSafetyActive()
-      ? "critical_lockout"
-      : "normal";
+  const uint8_t activeOutputCount = outputsAllowed
+      ? scenario.requestedOutputCount
+      : 0;
+  const bool output1Active = activeOutputCount >= 1;
+  const bool output2Active = activeOutputCount >= 2;
+  const bool output3Active = activeOutputCount >= 3;
+  const char* faultState = currentFaultState();
   const char* operatingMode = currentTestOperatingMode();
+  const char* nominalMode = scenarioManager.nominalOperatingMode();
 
-  char payload[1900];
+  char payload[2048];
 
   const int written = snprintf(
       payload,
@@ -715,15 +817,15 @@ void publishTelemetry() {
           "\"undervoltage\":%s"
         "},"
         "\"pv\":{"
-          "\"voltage_v\":19.8,"
-          "\"current_a\":12.4,"
-          "\"power_w\":245.5,"
-          "\"local_irradiance_wm2\":720.0"
+          "\"voltage_v\":%.3f,"
+          "\"current_a\":%.3f,"
+          "\"power_w\":%.3f,"
+          "\"local_irradiance_wm2\":%.1f"
         "},"
         "\"environment\":{"
-          "\"ambient_temperature_c\":28.4,"
-          "\"relative_humidity_percent\":46.0,"
-          "\"panel_temperature_c\":45.3"
+          "\"ambient_temperature_c\":%.2f,"
+          "\"relative_humidity_percent\":%.2f,"
+          "\"panel_temperature_c\":%.2f"
         "},"
         "\"outputs\":{"
           "\"output_1_active\":%s,"
@@ -731,25 +833,31 @@ void publishTelemetry() {
           "\"output_3_active\":%s,"
           "\"output_1_current_a\":%.2f,"
           "\"output_2_current_a\":%.2f,"
-          "\"output_3_current_a\":0.0"
+          "\"output_3_current_a\":%.2f"
         "},"
         "\"tracking\":{"
           "\"enabled\":%s,"
-          "\"angle_deg\":28.5,"
-          "\"target_angle_deg\":30.0,"
-          "\"master_position_raw\":2040,"
-          "\"slave_position_raw\":2025"
+          "\"angle_deg\":%.2f,"
+          "\"target_angle_deg\":%.2f,"
+          "\"master_position_raw\":%u,"
+          "\"slave_position_raw\":%u"
         "},"
         "\"decision\":{"
-          "\"weather_index\":0.78,"
-          "\"demand_index\":0.62,"
-          "\"fis_mode\":\"M4\","
-          "\"requested_mode\":\"M4\","
+          "\"weather_index\":%.3f,"
+          "\"demand_index\":%.3f,"
+          "\"fis_mode\":\"%s\","
+          "\"requested_mode\":\"%s\","
           "\"operating_mode\":\"%s\""
+        "},"
+        "\"simulation\":{"
+          "\"scenario\":\"%s\","
+          "\"elapsed_simulated_s\":%.1f,"
+          "\"time_scale\":%.1f,"
+          "\"stale_data_requested\":%s"
         "},"
         "\"fault_state\":\"%s\","
         "\"test_counter\":%lu,"
-        "\"source\":\"esp32_battery_emulator_v1\""
+        "\"source\":\"esp32_functional_simulation_v1\""
       "}",
       AWS_IOT_CLIENT_ID,
       timestamp,
@@ -762,13 +870,33 @@ void publishTelemetry() {
       battery.normalCurrentExceeded ? "true" : "false",
       battery.overcurrent ? "true" : "false",
       battery.undervoltage ? "true" : "false",
+      scenario.pvVoltageV,
+      scenario.pvCurrentA,
+      scenario.pvPowerW,
+      scenario.irradianceWm2,
+      scenario.ambientTemperatureC,
+      scenario.relativeHumidityPercent,
+      scenario.panelTemperatureC,
       output1Active ? "true" : "false",
       output2Active ? "true" : "false",
       output3Active ? "true" : "false",
       output1Active ? 1.62 : 0.0,
       output2Active ? 1.58 : 0.0,
+      output3Active ? 1.60 : 0.0,
       trackingEnabled ? "true" : "false",
+      scenario.trackingAngleDeg,
+      scenario.trackingTargetAngleDeg,
+      static_cast<unsigned int>(scenario.masterPositionRaw),
+      static_cast<unsigned int>(scenario.slavePositionRaw),
+      scenario.weatherIndex,
+      scenario.demandIndex,
+      nominalMode,
+      nominalMode,
       operatingMode,
+      scenarioManager.scenarioName(),
+      scenarioManager.elapsedSimulatedSeconds(),
+      batteryTimeScale,
+      scenarioManager.isStaleDataRequested() ? "true" : "false",
       faultState,
       static_cast<unsigned long>(telemetryCounter)
   );
