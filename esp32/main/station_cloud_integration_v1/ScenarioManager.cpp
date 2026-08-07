@@ -125,9 +125,6 @@ void ScenarioManager::loadProfile(ScenarioType scenario) {
     case ScenarioType::CLOUDY_DAY:
       profile_.initialSocPercent = 80.0f;
       profile_.irradianceWm2 = 350.0f;
-      profile_.pvVoltageV = 17.20f;
-      profile_.pvCurrentA = 7.56f;
-      profile_.pvPowerW = 130.0f;
       profile_.ambientTemperatureC = 23.0f;
       profile_.relativeHumidityPercent = 70.0f;
       profile_.panelTemperatureC = 29.0f;
@@ -144,9 +141,6 @@ void ScenarioManager::loadProfile(ScenarioType scenario) {
     case ScenarioType::LOW_BATTERY:
       profile_.initialSocPercent = 30.0f;
       profile_.irradianceWm2 = 250.0f;
-      profile_.pvVoltageV = 17.00f;
-      profile_.pvCurrentA = 5.59f;
-      profile_.pvPowerW = 95.0f;
       profile_.ambientTemperatureC = 26.0f;
       profile_.relativeHumidityPercent = 52.0f;
       profile_.panelTemperatureC = 34.0f;
@@ -163,9 +157,6 @@ void ScenarioManager::loadProfile(ScenarioType scenario) {
     case ScenarioType::HIGH_DEMAND:
       profile_.initialSocPercent = 85.0f;
       profile_.irradianceWm2 = 700.0f;
-      profile_.pvVoltageV = 17.60f;
-      profile_.pvCurrentA = 17.90f;
-      profile_.pvPowerW = 315.0f;
       profile_.ambientTemperatureC = 30.0f;
       profile_.relativeHumidityPercent = 40.0f;
       profile_.panelTemperatureC = 48.0f;
@@ -182,9 +173,6 @@ void ScenarioManager::loadProfile(ScenarioType scenario) {
     case ScenarioType::FAULT_EVENT:
       profile_.initialSocPercent = 80.0f;
       profile_.irradianceWm2 = 700.0f;
-      profile_.pvVoltageV = 17.50f;
-      profile_.pvCurrentA = 17.14f;
-      profile_.pvPowerW = 300.0f;
       profile_.ambientTemperatureC = 29.0f;
       profile_.relativeHumidityPercent = 43.0f;
       profile_.panelTemperatureC = 46.0f;
@@ -198,9 +186,6 @@ void ScenarioManager::loadProfile(ScenarioType scenario) {
     case ScenarioType::TRACKING_FAULT:
       profile_.initialSocPercent = 80.0f;
       profile_.irradianceWm2 = 750.0f;
-      profile_.pvVoltageV = 17.40f;
-      profile_.pvCurrentA = 14.37f;
-      profile_.pvPowerW = 250.0f;
       profile_.ambientTemperatureC = 29.0f;
       profile_.relativeHumidityPercent = 42.0f;
       profile_.panelTemperatureC = 44.0f;
@@ -218,9 +203,6 @@ void ScenarioManager::loadProfile(ScenarioType scenario) {
     case ScenarioType::STALE_DATA:
       profile_.initialSocPercent = 80.0f;
       profile_.irradianceWm2 = 600.0f;
-      profile_.pvVoltageV = 17.30f;
-      profile_.pvCurrentA = 12.72f;
-      profile_.pvPowerW = 220.0f;
       profile_.ambientTemperatureC = 27.0f;
       profile_.relativeHumidityPercent = 48.0f;
       profile_.panelTemperatureC = 40.0f;
@@ -235,9 +217,6 @@ void ScenarioManager::loadProfile(ScenarioType scenario) {
     default:
       profile_.initialSocPercent = 95.0f;
       profile_.irradianceWm2 = 850.0f;
-      profile_.pvVoltageV = 17.49f;
-      profile_.pvCurrentA = 21.87f;
-      profile_.pvPowerW = 382.5f;
       profile_.ambientTemperatureC = 28.0f;
       profile_.relativeHumidityPercent = 45.0f;
       profile_.panelTemperatureC = 45.0f;

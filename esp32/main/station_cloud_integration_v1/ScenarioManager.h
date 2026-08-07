@@ -15,10 +15,11 @@ enum class ScenarioType : uint8_t {
 struct ScenarioProfile {
   float initialSocPercent = 95.0f;
 
+  // Functional PV-simulation inputs. Electrical outputs are calculated by
+  // PVSimulator so the scenario does not duplicate voltage/current/power data.
   float irradianceWm2 = 850.0f;
-  float pvVoltageV = 17.49f;
-  float pvCurrentA = 21.87f;
-  float pvPowerW = 382.5f;
+  uint8_t availablePanelCount = 3;
+  float pvAvailabilityFactor = 1.0f;
 
   float ambientTemperatureC = 28.0f;
   float relativeHumidityPercent = 45.0f;
