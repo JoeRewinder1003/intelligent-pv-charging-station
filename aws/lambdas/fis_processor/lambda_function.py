@@ -21,7 +21,7 @@ STATUS_TABLE_NAME = os.environ.get(
 fis_decision_table = dynamodb.Table(FIS_DECISION_TABLE_NAME)
 status_table = dynamodb.Table(STATUS_TABLE_NAME)
 
-FIS_IMPLEMENTATION_VERSION = "article_v9_dispatch_v1"
+FIS_IMPLEMENTATION_VERSION = "article_v9_dispatch_v2_temporal_validation"
 
 COMMAND_DISPATCHER_FUNCTION_NAME = os.environ.get(
     "COMMAND_DISPATCHER_FUNCTION_NAME",
@@ -33,6 +33,9 @@ MODE_CONFIRMATION_SECONDS = int(
 )
 MIN_MODE_DWELL_SECONDS = int(
     os.environ.get("MIN_MODE_DWELL_SECONDS", "900")
+)
+STALE_DATA_THRESHOLD_SECONDS = float(
+    os.environ.get("STALE_DATA_THRESHOLD_SECONDS", "30")
 )
 
 OPERATING_MODES = {
@@ -50,10 +53,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     Evaluates the cloud-side fuzzy decision system and conditionally invokes
     command_dispatcher.
 
-    A command is dispatched only when the stabilized operating mode differs
-    from the last mode successfully sent to the station. If dispatch fails,
-    the state keeps the previous last-dispatched mode so the next evaluation
-    retries the command instead of silently losing it.
+    When AWS IoT reception metadata is present, the function independently
+    verifies telemetry freshness before the deterministic safety layer. A
+    stale measurement is treated as ``data_or_sensor_fault``. This check does
+    not use simulation flags and therefore validates the actual timestamp.
     """
 
     try:
@@ -69,16 +72,35 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 },
             )
 
-        station_id = payload["station_id"]
+        temporal_validation = evaluate_temporal_validation(payload)
+        evaluation_payload = apply_temporal_fault_override(
+            payload=payload,
+            temporal_validation=temporal_validation,
+        )
+
+        station_id = evaluation_payload["station_id"]
         previous_state = load_fis_state(station_id)
         evaluation_time = current_utc_timestamp()
 
         fis_result = evaluate_fis(
-            payload,
+            evaluation_payload,
             previous_state=previous_state,
             evaluation_time=evaluation_time,
         )
-        command_request = build_command_request(payload, fis_result)
+        fis_result["temporal_validation"] = temporal_validation
+        fis_result["station_reported_fault_state"] = evaluation_payload.get(
+            "station_reported_fault_state",
+            payload.get("fault_state", "normal"),
+        )
+        fis_result["cloud_effective_fault_state"] = evaluation_payload.get(
+            "fault_state",
+            "normal",
+        )
+
+        command_request = build_command_request(
+            evaluation_payload,
+            fis_result,
+        )
 
         dispatch_result = {
             "attempted": False,
@@ -114,10 +136,38 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             stabilization=stabilization_to_save,
         )
         save_fis_decision(
-            payload=payload,
+            payload=evaluation_payload,
             fis_result=fis_result,
             command_request=command_request,
             dispatch_result=dispatch_result,
+        )
+
+        print(
+            json.dumps(
+                {
+                    "event": "fis_evaluation",
+                    "station_id": station_id,
+                    "input_timestamp": evaluation_payload.get("timestamp"),
+                    "data_age_s": temporal_validation.get("data_age_s"),
+                    "stale_detected": temporal_validation.get(
+                        "stale_detected"
+                    ),
+                    "reported_fault_state": fis_result[
+                        "station_reported_fault_state"
+                    ],
+                    "effective_fault_state": fis_result[
+                        "cloud_effective_fault_state"
+                    ],
+                    "fis_mode": fis_result["main_fis_output"]["fis_mode"],
+                    "requested_mode": fis_result["final_decision"][
+                        "requested_mode"
+                    ],
+                    "operating_mode": fis_result["final_decision"][
+                        "operating_mode"
+                    ],
+                    "dispatch_status": dispatch_result["status"],
+                }
+            )
         )
 
         if dispatch_error is not None:
@@ -142,6 +192,14 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         )
 
     except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "event": "fis_processing_error",
+                    "error": str(exc),
+                }
+            )
+        )
         return response(
             500,
             {
@@ -229,6 +287,101 @@ def validate_numeric(
 
     if max_value is not None and value > max_value:
         errors.append(f"{field} must be <= {max_value}")
+
+
+def evaluate_temporal_validation(
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Independently verify message freshness when AWS reception metadata exists.
+
+    Direct/local FIS tests that do not include ``received_at_epoch_ms`` keep
+    their previous behavior and are marked as not temporally evaluated.
+    """
+
+    received_at_epoch_ms = payload.get("received_at_epoch_ms")
+    measurement_timestamp = payload.get("timestamp")
+
+    if (
+        isinstance(received_at_epoch_ms, bool)
+        or not isinstance(received_at_epoch_ms, (int, float))
+        or not isinstance(measurement_timestamp, str)
+    ):
+        return {
+            "evaluated": False,
+            "measurement_timestamp": measurement_timestamp,
+            "received_at_epoch_ms": received_at_epoch_ms,
+            "data_age_s": None,
+            "stale_threshold_s": STALE_DATA_THRESHOLD_SECONDS,
+            "stale_detected": False,
+        }
+
+    measurement_time = parse_utc_timestamp(measurement_timestamp)
+
+    if measurement_time is None:
+        return {
+            "evaluated": False,
+            "measurement_timestamp": measurement_timestamp,
+            "received_at_epoch_ms": received_at_epoch_ms,
+            "data_age_s": None,
+            "stale_threshold_s": STALE_DATA_THRESHOLD_SECONDS,
+            "stale_detected": False,
+        }
+
+    received_time = datetime.fromtimestamp(
+        float(received_at_epoch_ms) / 1000.0,
+        tz=timezone.utc,
+    )
+    signed_age_seconds = (
+        received_time - measurement_time
+    ).total_seconds()
+    data_age_seconds = max(0.0, signed_age_seconds)
+
+    return {
+        "evaluated": True,
+        "measurement_timestamp": measurement_timestamp,
+        "received_at_epoch_ms": int(received_at_epoch_ms),
+        "data_age_s": round(data_age_seconds, 3),
+        "stale_threshold_s": STALE_DATA_THRESHOLD_SECONDS,
+        "stale_detected": (
+            data_age_seconds > STALE_DATA_THRESHOLD_SECONDS
+        ),
+    }
+
+
+def apply_temporal_fault_override(
+    payload: Dict[str, Any],
+    temporal_validation: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Apply cloud-derived stale-data protection without overwriting evidence of
+    the station-reported fault state.
+    """
+
+    evaluation_payload = dict(payload)
+    station_reported_fault_state = payload.get(
+        "station_reported_fault_state",
+        payload.get("fault_state", "normal"),
+    )
+    current_fault_state = payload.get("fault_state", "normal")
+
+    evaluation_payload["station_reported_fault_state"] = (
+        station_reported_fault_state
+    )
+
+    if current_fault_state == "critical_lockout":
+        effective_fault_state = "critical_lockout"
+    elif temporal_validation.get("stale_detected", False):
+        effective_fault_state = "data_or_sensor_fault"
+    else:
+        effective_fault_state = current_fault_state
+
+    evaluation_payload["fault_state"] = effective_fault_state
+    evaluation_payload["cloud_effective_fault_state"] = (
+        effective_fault_state
+    )
+
+    return evaluation_payload
 
 
 def evaluate_fis(
@@ -1225,6 +1378,21 @@ def build_fis_history_item(
                 "blocked_reasons"
             ],
         },
+        "temporal_validation": fis_result.get(
+            "temporal_validation",
+            {
+                "evaluated": False,
+                "stale_detected": False,
+            },
+        ),
+        "station_reported_fault_state": fis_result.get(
+            "station_reported_fault_state",
+            payload.get("fault_state", "normal"),
+        ),
+        "cloud_effective_fault_state": fis_result.get(
+            "cloud_effective_fault_state",
+            payload.get("fault_state", "normal"),
+        ),
         "mode_stabilization": fis_result["mode_stabilization"],
         "final_decision": {
             "requested_mode": requested_mode,

@@ -905,6 +905,13 @@ const char* currentFaultState() {
     return "critical_lockout";
   }
 
+  // STALE_DATA injects only an old measurement timestamp. The station does
+  // not declare the stale-data fault itself; AWS must detect the age of the
+  // message and convert it to a cloud-side data_or_sensor_fault.
+  if (scenarioManager.isStaleDataRequested()) {
+    return "normal";
+  }
+
   return scenarioManager.faultStateText();
 }
 

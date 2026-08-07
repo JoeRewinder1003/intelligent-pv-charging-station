@@ -67,6 +67,14 @@ class TelemetryProcessorTests(unittest.TestCase):
         with (
             patch.object(telemetry.telemetry_table, "put_item") as put_item,
             patch.object(telemetry.status_table, "update_item") as update_item,
+            patch.object(
+                telemetry,
+                "invoke_fis_processor",
+                return_value={
+                    "status_code": 200,
+                    "body": {"message": "FIS processed in unit test"},
+                },
+            ) as invoke_fis,
         ):
             result = telemetry.lambda_handler(self.payload, None)
 
@@ -77,6 +85,7 @@ class TelemetryProcessorTests(unittest.TestCase):
         )
         put_item.assert_called_once()
         update_item.assert_called_once()
+        invoke_fis.assert_called_once()
 
     def test_invalid_payload_returns_400_without_writes(self):
         invalid_payload = dict(self.payload)
