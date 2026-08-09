@@ -65,27 +65,81 @@ class TelemetryProcessorTests(unittest.TestCase):
 
     def test_valid_payload_is_stored_and_status_is_updated(self):
         with (
-            patch.object(telemetry.telemetry_table, "put_item") as put_item,
-            patch.object(telemetry.status_table, "update_item") as update_item,
+            patch.object(
+                telemetry.telemetry_table,
+                "put_item",
+            ) as put_item,
+            patch.object(
+                telemetry.status_table,
+                "update_item",
+            ) as update_item,
+            patch.object(
+                telemetry,
+                "invoke_demand_estimator",
+                return_value={
+                    "demand_index": 0.60,
+                    "source": "default_demand_profile",
+                    "slot_id": "day_0_slot_18",
+                    "day_index": 0,
+                    "slot_index": 18,
+                    "local_time": "2026-08-10T09:15:00-06:00",
+                    "timezone": "America/Mexico_City",
+                    "adaptive": False,
+                },
+            ) as invoke_demand,
             patch.object(
                 telemetry,
                 "invoke_fis_processor",
                 return_value={
                     "status_code": 200,
-                    "body": {"message": "FIS processed in unit test"},
+                    "body": {
+                        "message": "FIS processed in unit test",
+                    },
                 },
             ) as invoke_fis,
         ):
-            result = telemetry.lambda_handler(self.payload, None)
+            result = telemetry.lambda_handler(
+                self.payload,
+                None,
+            )
 
-        self.assertEqual(result["statusCode"], 200)
         self.assertEqual(
-            parse_lambda_body(result)["message"],
+            result["statusCode"],
+            200,
+        )
+
+        body = parse_lambda_body(
+            result
+        )
+
+        self.assertEqual(
+            body["message"],
             "Telemetry processed successfully",
         )
+
+        self.assertEqual(
+            body["demand_result"]["demand_index"],
+            0.60,
+        )
+
+        self.assertEqual(
+            body["demand_result"]["source"],
+            "default_demand_profile",
+        )
+
         put_item.assert_called_once()
         update_item.assert_called_once()
+        invoke_demand.assert_called_once()
         invoke_fis.assert_called_once()
+
+        fis_payload = (
+            invoke_fis.call_args.args[0]
+        )
+
+        self.assertEqual(
+            fis_payload["decision"]["demand_index"],
+            0.60,
+        )
 
     def test_invalid_payload_returns_400_without_writes(self):
         invalid_payload = dict(self.payload)
