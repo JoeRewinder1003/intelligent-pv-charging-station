@@ -14,6 +14,9 @@ struct BatteryConfig {
   float capacityAhPerBattery = 100.0f;
   float nominalVoltageV = 12.0f;
   float initialSocPercent = 95.0f;
+  // Simulation-only capacity retention used as SOH ground truth.
+  // This value is not reported to the cloud as an estimated SOH.
+  float emulatedCapacityRetentionPercent = 100.0f;
 
   // Configurable emulation assumptions supported by literature.
   float chargeEfficiency = 0.90f;
@@ -77,8 +80,10 @@ class BatteryEmulator {
 
   float bankCapacityAh() const;
   float nominalEnergyWh() const;
+  float effectiveCapacityAh() const;
+  float effectiveEnergyWh() const;
   float equivalentResistanceOhm() const;
-
+  
   const char* protectionStateText() const;
   bool isCritical() const;
   bool isRestricted() const;

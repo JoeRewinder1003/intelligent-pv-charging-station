@@ -629,6 +629,14 @@ void printBatteryStatus() {
       batteryEmulator.config().capacityAhPerBattery,
       batteryEmulator.nominalEnergyWh()
   );
+  Serial.printf(
+    "  Effective capacity: %.1f Ah\n",
+    batteryEmulator.effectiveCapacityAh()
+  );
+  Serial.printf(
+    "  Capacity retention: %.1f%%\n",
+    batteryEmulator.config().emulatedCapacityRetentionPercent
+  );
   Serial.printf("  SOC: %.3f%%\n", battery.socPercent);
   Serial.printf("  OCV: %.3f V\n", battery.openCircuitVoltageV);
   Serial.printf("  Terminal voltage: %.3f V\n", battery.terminalVoltageV);

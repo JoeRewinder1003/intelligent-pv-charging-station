@@ -55,6 +55,12 @@ void BatteryEmulator::sanitizeConfiguration() {
 
   config_.initialSocPercent =
       clampFloat(config_.initialSocPercent, 0.0f, 100.0f);
+  config_.emulatedCapacityRetentionPercent =
+    clampFloat(
+        config_.emulatedCapacityRetentionPercent,
+        1.0f,
+        100.0f
+    );
   config_.chargeEfficiency =
       clampFloat(config_.chargeEfficiency, MIN_EFFICIENCY, 1.0f);
   config_.dischargeEfficiency =
@@ -102,9 +108,9 @@ void BatteryEmulator::update(
 
   const float previousStoredEnergyWh = state_.storedEnergyWh;
   state_.storedEnergyWh = clampFloat(
-      state_.storedEnergyWh + storedEnergyDeltaWh,
-      0.0f,
-      nominalEnergyWh()
+    state_.storedEnergyWh + storedEnergyDeltaWh,
+    0.0f,
+    effectiveEnergyWh()
   );
 
   const float appliedStoredEnergyDeltaWh =
@@ -117,9 +123,11 @@ void BatteryEmulator::update(
   }
 
   state_.socPercent =
-      100.0f * state_.storedEnergyWh / nominalEnergyWh();
+    100.0f * state_.storedEnergyWh / effectiveEnergyWh();
+
   state_.consumedCapacityAh =
-      bankCapacityAh() * (100.0f - state_.socPercent) / 100.0f;
+    effectiveCapacityAh() *
+    (100.0f - state_.socPercent) / 100.0f;
 
   // Recalculate OCV and terminal voltage using the updated SOC while
   // maintaining the same requested external power.
@@ -130,9 +138,11 @@ void BatteryEmulator::update(
 void BatteryEmulator::setSocPercent(float socPercent) {
   state_.socPercent = clampFloat(socPercent, 0.0f, 100.0f);
   state_.storedEnergyWh =
-      nominalEnergyWh() * state_.socPercent / 100.0f;
+    effectiveEnergyWh() * state_.socPercent / 100.0f;
+
   state_.consumedCapacityAh =
-      bankCapacityAh() * (100.0f - state_.socPercent) / 100.0f;
+    effectiveCapacityAh() *
+    (100.0f - state_.socPercent) / 100.0f;
   solveElectricalState(0.0f);
   updateProtectionState();
 }
@@ -272,6 +282,15 @@ float BatteryEmulator::bankCapacityAh() const {
 
 float BatteryEmulator::nominalEnergyWh() const {
   return config_.nominalVoltageV * bankCapacityAh();
+}
+
+float BatteryEmulator::effectiveCapacityAh() const {
+  return bankCapacityAh() *
+         config_.emulatedCapacityRetentionPercent / 100.0f;
+}
+
+float BatteryEmulator::effectiveEnergyWh() const {
+  return config_.nominalVoltageV * effectiveCapacityAh();
 }
 
 float BatteryEmulator::equivalentResistanceOhm() const {
