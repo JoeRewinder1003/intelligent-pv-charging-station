@@ -36,3 +36,4 @@ cdk.out/
 .DS_Store
 Thumbs.db
 
+aws/lambdas/**/*.zip
