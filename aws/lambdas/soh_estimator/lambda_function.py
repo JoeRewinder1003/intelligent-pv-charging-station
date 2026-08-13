@@ -1,3 +1,4 @@
+import boto3
 import json
 import math
 import os
@@ -12,6 +13,10 @@ MIN_CURRENT_STEP_A = float(
     )
 )
 
+BATTERY_HEALTH_TABLE_NAME = "BatteryHealthHistory"
+
+dynamodb = boto3.resource("dynamodb")
+battery_health_table = dynamodb.Table(BATTERY_HEALTH_TABLE_NAME)
 
 def lambda_handler(
     event: Dict[str, Any],
@@ -25,7 +30,7 @@ def lambda_handler(
     - Validates SmartShunt-equivalent voltage and current measurements.
     - Calculates apparent battery-bank resistance in AWS.
     - Does not calculate battery SOH percentage from resistance.
-    - Does not write results to DynamoDB yet.
+    - Stores validated resistance-step results in BatteryHealthHistory.
 
     Capacity-based SOH assessment will be added separately.
     """
@@ -194,7 +199,25 @@ def process_resistance_step(
         ),
         "minimum_current_step_a": MIN_CURRENT_STEP_A,
     }
+    history_item = {
+        "station_id": station_id,
+        "timestamp": timestamp,
+        "event_type": "resistance_step",
+        "voltage_before_v": Decimal(str(result["voltage_before_v"])),
+        "voltage_after_v": Decimal(str(result["voltage_after_v"])),
+        "current_before_a": Decimal(str(result["current_before_a"])),
+        "current_after_a": Decimal(str(result["current_after_a"])),
+        "soc_percent": Decimal(str(result["soc_percent"])),
+        "delta_current_a": Decimal(str(result["delta_current_a"])),
+        "apparent_resistance_mohm": Decimal(
+            str(result["apparent_resistance_mohm"])
+        ),
+    }
 
+    battery_health_table.put_item(
+        Item=history_item
+    )
+    
     print(
         json.dumps(
             {
