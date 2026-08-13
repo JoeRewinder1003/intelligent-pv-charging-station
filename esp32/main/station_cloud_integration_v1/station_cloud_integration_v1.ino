@@ -8,6 +8,7 @@
 
 #include "secrets.h"
 #include "BatteryEmulator.h"
+#include "BatteryHealthIndicator.h"
 #include "ScenarioManager.h"
 #include "PVSimulator.h"
 
@@ -83,6 +84,7 @@ uint32_t telemetryCounter = 0;
 
 BatteryConfig batteryConfig;
 BatteryEmulator batteryEmulator(batteryConfig);
+BatteryHealthIndicator batteryHealthIndicator;
 ScenarioManager scenarioManager;
 PVConfig pvConfig;
 PVSimulator pvSimulator(pvConfig);
@@ -90,6 +92,9 @@ PVSimulator pvSimulator(pvConfig);
 bool manualBatteryPowerOverride = false;
 float manualBatteryPowerW = 0.0f;
 float batteryTimeScale = 1.0f;
+BatteryHealthSample previousBatteryHealthSample;
+uint8_t previousBatteryHealthOutputCount = 0;
+bool previousBatteryHealthSampleAvailable = false;
 
 /*
  * Simulated safety state used only for this validation test.
@@ -763,6 +768,7 @@ void updateBatteryEmulator() {
   scenarioManager.update(simulatedDeltaTimeSeconds);
 
   const ScenarioProfile& scenario = scenarioManager.profile();
+
   pvSimulator.update(
       scenario.irradianceWm2,
       scenario.panelTemperatureC,
@@ -778,6 +784,75 @@ void updateBatteryEmulator() {
       batteryPowerW,
       simulatedDeltaTimeSeconds
   );
+
+  const BatteryState& battery = batteryEmulator.state();
+
+  BatteryHealthSample currentSample;
+  currentSample.voltageV = battery.terminalVoltageV;
+  currentSample.currentA = battery.currentA;
+  currentSample.socPercent = battery.socPercent;
+
+  const uint8_t currentOutputCount = currentActiveOutputCount();
+
+  if (previousBatteryHealthSampleAvailable &&
+      currentOutputCount != previousBatteryHealthOutputCount) {
+
+    const float deltaCurrentA =
+        currentSample.currentA -
+        previousBatteryHealthSample.currentA;
+
+    const float deltaVoltageV =
+        currentSample.voltageV -
+        previousBatteryHealthSample.voltageV;
+
+    Serial.println();
+    Serial.println("Battery health load-step detected:");
+
+    Serial.printf(
+        "  Outputs: %u -> %u\n",
+        static_cast<unsigned int>(
+            previousBatteryHealthOutputCount
+        ),
+        static_cast<unsigned int>(currentOutputCount)
+    );
+
+    Serial.printf(
+        "  Before: V=%.3f V, I=%.3f A, SOC=%.3f%%\n",
+        previousBatteryHealthSample.voltageV,
+        previousBatteryHealthSample.currentA,
+        previousBatteryHealthSample.socPercent
+    );
+
+    Serial.printf(
+        "  After:  V=%.3f V, I=%.3f A, SOC=%.3f%%\n",
+        currentSample.voltageV,
+        currentSample.currentA,
+        currentSample.socPercent
+    );
+
+    Serial.printf(
+        "  dV=%.4f V, dI=%.3f A\n",
+        deltaVoltageV,
+        deltaCurrentA
+    );
+
+    if (batteryHealthIndicator.evaluateStep(
+            previousBatteryHealthSample,
+            currentSample
+        )) {
+      Serial.println(
+          "  Result: valid Battery Health Indicator sample."
+      );
+    } else {
+      Serial.println(
+          "  Result: sample rejected by validation conditions."
+      );
+    }
+  }
+
+  previousBatteryHealthSample = currentSample;
+  previousBatteryHealthOutputCount = currentOutputCount;
+  previousBatteryHealthSampleAvailable = true;
 }
 
 bool isCriticalSafetyActive() {
