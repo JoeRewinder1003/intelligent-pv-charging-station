@@ -45,6 +45,9 @@ static constexpr char COMMAND_TOPIC[] =
 static constexpr char ACK_TOPIC[] =
     "station/station_001/acks";
 
+static constexpr char BATTERY_DIAGNOSTICS_TOPIC[] =
+    "station/station_001/battery_diagnostics";
+
 // ============================================================
 // Timing and test configuration
 // ============================================================
@@ -168,6 +171,9 @@ const char* currentFaultState();
 
 void publishTelemetry();
 void publishPendingCommandAck();
+void publishBatteryResistanceStep(
+    const BatteryHealthEvent& event
+);
 void prepareCommandAck(
     const char* commandId,
     const char* command,
@@ -843,6 +849,9 @@ void updateBatteryEmulator() {
       Serial.println(
           "  Result: valid Battery Health Indicator sample."
       );
+      publishBatteryResistanceStep(
+        batteryHealthIndicator.lastEvent()
+      );
     } else {
       Serial.println(
           "  Result: sample rejected by validation conditions."
@@ -1001,6 +1010,81 @@ const char* currentFaultState() {
 // ============================================================
 // Telemetry
 // ============================================================
+void publishBatteryResistanceStep(
+    const BatteryHealthEvent& event
+) {
+  if (!event.valid) {
+    return;
+  }
+
+  if (!mqttClient.connected()) {
+    Serial.println(
+        "Battery diagnostic not published: MQTT is disconnected."
+    );
+    return;
+  }
+
+  char timestamp[25];
+
+  if (!getUtcTimestamp(timestamp, sizeof(timestamp))) {
+    Serial.println(
+        "Battery diagnostic not published: UTC time is not synchronized."
+    );
+    return;
+  }
+
+  const float socPercent =
+      (event.socBeforePercent + event.socAfterPercent) / 2.0f;
+
+  char payload[512];
+
+  const int written = snprintf(
+      payload,
+      sizeof(payload),
+      "{"
+        "\"station_id\":\"%s\","
+        "\"timestamp\":\"%s\","
+        "\"event_type\":\"resistance_step\","
+        "\"voltage_before_v\":%.4f,"
+        "\"voltage_after_v\":%.4f,"
+        "\"current_before_a\":%.4f,"
+        "\"current_after_a\":%.4f,"
+        "\"soc_percent\":%.3f"
+      "}",
+      AWS_IOT_CLIENT_ID,
+      timestamp,
+      event.voltageBeforeV,
+      event.voltageAfterV,
+      event.currentBeforeA,
+      event.currentAfterA,
+      socPercent
+  );
+
+  if (written < 0 ||
+      written >= static_cast<int>(sizeof(payload))) {
+    Serial.println(
+        "Battery diagnostic not published: payload buffer too small."
+    );
+    return;
+  }
+
+  if (!mqttClient.publish(
+          BATTERY_DIAGNOSTICS_TOPIC,
+          payload
+      )) {
+    Serial.println(
+        "Battery diagnostic MQTT publish failed."
+    );
+    return;
+  }
+
+  Serial.printf(
+      "Battery diagnostic published to %s (%d bytes):\n",
+      BATTERY_DIAGNOSTICS_TOPIC,
+      written
+  );
+  Serial.println(payload);
+}
 
 void publishTelemetry() {
   if (!mqttClient.connected()) {
