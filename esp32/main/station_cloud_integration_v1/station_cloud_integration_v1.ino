@@ -9,6 +9,7 @@
 #include "secrets.h"
 #include "BatteryEmulator.h"
 #include "BatteryHealthIndicator.h"
+#include "BatteryCapacityTest.h"
 #include "ScenarioManager.h"
 #include "PVSimulator.h"
 
@@ -88,6 +89,10 @@ uint32_t telemetryCounter = 0;
 BatteryConfig batteryConfig;
 BatteryEmulator batteryEmulator(batteryConfig);
 BatteryHealthIndicator batteryHealthIndicator;
+
+BatteryCapacityTestPlant capacityTestPlant;
+BatteryCapacityTestMonitor capacityTestMonitor;
+
 ScenarioManager scenarioManager;
 PVConfig pvConfig;
 PVSimulator pvSimulator(pvConfig);
@@ -95,6 +100,7 @@ PVSimulator pvSimulator(pvConfig);
 bool manualBatteryPowerOverride = false;
 float manualBatteryPowerW = 0.0f;
 float batteryTimeScale = 1.0f;
+constexpr float CAPACITY_TEST_TIME_SCALE = 600.0f;
 BatteryHealthSample previousBatteryHealthSample;
 uint8_t previousBatteryHealthOutputCount = 0;
 bool previousBatteryHealthSampleAvailable = false;
@@ -152,6 +158,8 @@ void printSimulatedSafetyState();
 void printBatteryStatus();
 void printPvStatus();
 void printScenarioStatus();
+void printCapacityTestStatus();
+const char* capacityTestStateText(BatteryCapacityTestState state);
 void applyScenarioInitialConditions();
 void updateBatteryEmulator();
 
@@ -530,6 +538,59 @@ void processSerialCommands() {
     return;
   }
 
+  if (serialCommand == "CAPACITY TEST START") {
+    capacityTestPlant.start();
+    capacityTestMonitor.start();
+
+    Serial.println("Battery capacity test started.");
+    printCapacityTestStatus();
+    return;
+  }
+
+  if (serialCommand == "CAPACITY TEST STATUS") {
+    printCapacityTestStatus();
+    return;
+  }
+
+  if (serialCommand == "CAPACITY TEST ABORT") {
+    capacityTestPlant.abort();
+    capacityTestMonitor.abort();
+
+    Serial.println("Battery capacity test aborted.");
+    printCapacityTestStatus();
+    return;
+  }
+
+  if (serialCommand.startsWith("CAPACITY TEST GROUND TRUTH ")) {
+    const float requestedRetention =
+        serialCommand.substring(
+            strlen("CAPACITY TEST GROUND TRUTH ")
+        ).toFloat();
+
+    if (!isfinite(requestedRetention) ||
+        requestedRetention <= 0.0f ||
+        requestedRetention > 100.0f) {
+      Serial.println(
+          "Invalid capacity-test ground truth. Allowed range: >0 to 100 percent."
+      );
+      return;
+    }
+
+    if (!capacityTestPlant.setCapacityRetentionPercent(
+            requestedRetention)) {
+      Serial.println(
+          "Cannot change capacity-test ground truth while the test is running."
+      );
+      return;
+    }
+
+    Serial.printf(
+        "Capacity-test simulation ground truth set to %.1f%%.\n",
+        requestedRetention
+    );
+    return;
+  }
+
   if (serialCommand == "BATTERY AUTO") {
     manualBatteryPowerOverride = false;
     Serial.println("Battery power returned to automatic station balance.");
@@ -588,7 +649,10 @@ void processSerialCommands() {
     }
 
     batteryTimeScale = requestedScale;
-    Serial.printf("Battery emulation time scale set to x%.1f.\n", batteryTimeScale);
+    Serial.printf(
+        "Battery emulation time scale set to x%.1f.\n",
+        batteryTimeScale
+    );
     return;
   }
 
@@ -607,6 +671,10 @@ void printSerialHelp() {
   Serial.println("  SCENARIO FAULT_EVENT");
   Serial.println("  SCENARIO TRACKING_FAULT");
   Serial.println("  SCENARIO STALE_DATA");
+  Serial.println("  CAPACITY TEST START");
+  Serial.println("  CAPACITY TEST STATUS");
+  Serial.println("  CAPACITY TEST ABORT");
+  Serial.println("  CAPACITY TEST GROUND TRUTH <percent>");
   Serial.println("  SAFETY ON");
   Serial.println("  SAFETY OFF");
   Serial.println("  PV STATUS");
@@ -704,6 +772,73 @@ void printPvStatus() {
   Serial.println();
 }
 
+const char* capacityTestStateText(BatteryCapacityTestState state) {
+  switch (state) {
+    case BatteryCapacityTestState::IDLE:
+      return "IDLE";
+
+    case BatteryCapacityTestState::RUNNING:
+      return "RUNNING";
+
+    case BatteryCapacityTestState::COMPLETED:
+      return "COMPLETED";
+
+    case BatteryCapacityTestState::ABORTED:
+      return "ABORTED";
+
+    default:
+      return "UNKNOWN";
+  }
+}
+
+void printCapacityTestStatus() {
+  const BatteryCapacityTestSample& sample =
+      capacityTestPlant.sample();
+
+  const BatteryCapacityTestResult& result =
+      capacityTestMonitor.result();
+
+  Serial.println();
+  Serial.println("Battery capacity test:");
+
+  Serial.printf(
+      "  Simulation ground truth: %.1f%%\n",
+      capacityTestPlant.capacityRetentionPercent()
+  );
+
+  Serial.printf(
+      "  Plant state: %s\n",
+      capacityTestStateText(capacityTestPlant.state())
+  );
+
+  Serial.printf(
+      "  Monitor state: %s\n",
+      capacityTestStateText(capacityTestMonitor.state())
+  );
+
+  Serial.printf(
+      "  Test voltage: %.3f V\n",
+      sample.voltageV
+  );
+
+  Serial.printf(
+      "  Test current: %.3f A\n",
+      sample.currentA
+  );
+
+  Serial.printf(
+      "  Measured capacity: %.3f Ah\n",
+      result.measuredCapacityAh
+  );
+
+  Serial.printf(
+      "  Elapsed simulated time: %.1f s\n",
+      result.elapsedSimulatedSeconds
+  );
+
+  Serial.println();
+}
+
 void printScenarioStatus() {
   const ScenarioProfile& profile = scenarioManager.profile();
 
@@ -768,8 +903,36 @@ void updateBatteryEmulator() {
 
   lastBatteryUpdateMs = now;
 
+  const float realDeltaTimeSeconds =
+      static_cast<float>(elapsedMs) / 1000.0f;
+
   const float simulatedDeltaTimeSeconds =
-      (static_cast<float>(elapsedMs) / 1000.0f) * batteryTimeScale;
+      realDeltaTimeSeconds * batteryTimeScale;
+
+  const float capacityTestDeltaTimeSeconds =
+      realDeltaTimeSeconds * CAPACITY_TEST_TIME_SCALE;
+
+  // Run the independent battery capacity-test simulation when active.
+  if (capacityTestPlant.state() == BatteryCapacityTestState::RUNNING &&
+      capacityTestMonitor.state() == BatteryCapacityTestState::RUNNING) {
+
+    capacityTestPlant.update(capacityTestDeltaTimeSeconds);
+
+    const BatteryCapacityTestSample& capacitySample =
+        capacityTestPlant.sample();
+
+    capacityTestMonitor.update(
+        capacitySample.voltageV,
+        capacitySample.currentA,
+        capacityTestDeltaTimeSeconds
+    );
+
+    if (capacityTestMonitor.state() == BatteryCapacityTestState::COMPLETED) {
+      Serial.println();
+      Serial.println("Battery capacity test completed.");
+      printCapacityTestStatus();
+    }
+  }
 
   scenarioManager.update(simulatedDeltaTimeSeconds);
 
