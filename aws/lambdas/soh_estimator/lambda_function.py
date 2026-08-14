@@ -13,6 +13,8 @@ MIN_CURRENT_STEP_A = float(
     )
 )
 
+NOMINAL_BATTERY_CAPACITY_AH = 300.0
+
 BATTERY_HEALTH_TABLE_NAME = "BatteryHealthHistory"
 
 dynamodb = boto3.resource("dynamodb")
@@ -56,19 +58,26 @@ def lambda_handler(
                 },
             )
 
-        if event_type != "resistance_step":
-            return response(
-                400,
-                {
-                    "message": "Unsupported battery diagnostic event",
-                    "event_type": event_type,
-                },
+        if event_type == "resistance_step":
+            return process_resistance_step(
+                event=event,
+                station_id=station_id,
+                timestamp=timestamp,
             )
 
-        return process_resistance_step(
-            event=event,
-            station_id=station_id,
-            timestamp=timestamp,
+        if event_type == "capacity_test":
+            return process_capacity_test(
+                event=event,
+                station_id=station_id,
+                timestamp=timestamp,
+            )
+
+        return response(
+            400,
+            {
+                "message": "Unsupported battery diagnostic event",
+                "event_type": event_type,
+            },
         )
 
     except Exception as exc:
@@ -237,6 +246,107 @@ def process_resistance_step(
         },
     )
 
+
+def process_capacity_test(
+    event: Dict[str, Any],
+    station_id: str,
+    timestamp: str,
+) -> Dict[str, Any]:
+    """
+    Calculates battery SOH percentage from a controlled capacity test.
+
+    Only the measured discharged capacity is used to calculate SOH.
+    Simulation ground truth is not received or used by this function.
+    """
+
+    measured_capacity_ah = normalize_number(
+        event.get("measured_capacity_ah")
+    )
+    final_voltage_v = normalize_number(
+        event.get("final_voltage_v")
+    )
+    elapsed_test_s = normalize_number(
+        event.get("elapsed_test_s")
+    )
+
+    if measured_capacity_ah is None or measured_capacity_ah <= 0.0:
+        return response(
+            400,
+            {
+                "message": "measured_capacity_ah must be a positive number"
+            },
+        )
+
+    if final_voltage_v is None or final_voltage_v <= 0.0:
+        return response(
+            400,
+            {
+                "message": "final_voltage_v must be a positive number"
+            },
+        )
+
+    if elapsed_test_s is None or elapsed_test_s <= 0.0:
+        return response(
+            400,
+            {
+                "message": "elapsed_test_s must be a positive number"
+            },
+        )
+
+    soh_percent = (
+        measured_capacity_ah /
+        NOMINAL_BATTERY_CAPACITY_AH
+    ) * 100.0
+
+    result = {
+        "station_id": station_id,
+        "timestamp": timestamp,
+        "event_type": "capacity_test",
+        "measured_capacity_ah": round(measured_capacity_ah, 3),
+        "nominal_capacity_ah": NOMINAL_BATTERY_CAPACITY_AH,
+        "soh_percent": round(soh_percent, 2),
+        "final_voltage_v": round(final_voltage_v, 3),
+        "elapsed_test_s": round(elapsed_test_s, 1),
+    }
+
+    history_item = {
+        "station_id": station_id,
+        "timestamp": timestamp,
+        "event_type": "capacity_test",
+        "measured_capacity_ah": Decimal(
+            str(result["measured_capacity_ah"])
+        ),
+        "nominal_capacity_ah": Decimal(
+            str(result["nominal_capacity_ah"])
+        ),
+        "soh_percent": Decimal(
+            str(result["soh_percent"])
+        ),
+        "final_voltage_v": Decimal(
+            str(result["final_voltage_v"])
+        ),
+        "elapsed_test_s": Decimal(
+            str(result["elapsed_test_s"])
+        ),
+    }
+
+    battery_health_table.put_item(
+        Item=history_item
+    )
+
+    print(
+        json.dumps(
+            {
+                "event": "battery_capacity_test_processed",
+                **result,
+            }
+        )
+    )
+
+    return response(
+        200,
+        result,
+    )
 
 def normalize_number(value: Any) -> Optional[float]:
     """

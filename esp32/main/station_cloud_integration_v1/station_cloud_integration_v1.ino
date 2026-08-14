@@ -182,6 +182,12 @@ void publishPendingCommandAck();
 void publishBatteryResistanceStep(
     const BatteryHealthEvent& event
 );
+
+void publishBatteryCapacityTest(
+    const BatteryCapacityTestResult& result,
+    float finalVoltageV
+);
+
 void prepareCommandAck(
     const char* commandId,
     const char* command,
@@ -931,6 +937,11 @@ void updateBatteryEmulator() {
       Serial.println();
       Serial.println("Battery capacity test completed.");
       printCapacityTestStatus();
+
+      publishBatteryCapacityTest(
+        capacityTestMonitor.result(),
+        capacityTestPlant.sample().voltageV
+      );
     }
   }
 
@@ -1243,6 +1254,83 @@ void publishBatteryResistanceStep(
 
   Serial.printf(
       "Battery diagnostic published to %s (%d bytes):\n",
+      BATTERY_DIAGNOSTICS_TOPIC,
+      written
+  );
+  Serial.println(payload);
+}
+
+void publishBatteryCapacityTest(
+    const BatteryCapacityTestResult& result,
+    float finalVoltageV
+) {
+  if (!isfinite(result.measuredCapacityAh) ||
+      result.measuredCapacityAh <= 0.0f ||
+      !isfinite(result.elapsedSimulatedSeconds) ||
+      result.elapsedSimulatedSeconds <= 0.0f ||
+      !isfinite(finalVoltageV)) {
+    Serial.println(
+        "Battery capacity diagnostic not published: invalid test result."
+    );
+    return;
+  }
+
+  if (!mqttClient.connected()) {
+    Serial.println(
+        "Battery capacity diagnostic not published: MQTT is disconnected."
+    );
+    return;
+  }
+
+  char timestamp[25];
+
+  if (!getUtcTimestamp(timestamp, sizeof(timestamp))) {
+    Serial.println(
+        "Battery capacity diagnostic not published: UTC time is not synchronized."
+    );
+    return;
+  }
+
+  char payload[256];
+
+  const int written = snprintf(
+      payload,
+      sizeof(payload),
+      "{"
+        "\"station_id\":\"%s\","
+        "\"timestamp\":\"%s\","
+        "\"event_type\":\"capacity_test\","
+        "\"measured_capacity_ah\":%.3f,"
+        "\"final_voltage_v\":%.3f,"
+        "\"elapsed_test_s\":%.1f"
+      "}",
+      AWS_IOT_CLIENT_ID,
+      timestamp,
+      result.measuredCapacityAh,
+      finalVoltageV,
+      result.elapsedSimulatedSeconds
+  );
+
+  if (written < 0 ||
+      written >= static_cast<int>(sizeof(payload))) {
+    Serial.println(
+        "Battery capacity diagnostic not published: payload buffer too small."
+    );
+    return;
+  }
+
+  if (!mqttClient.publish(
+          BATTERY_DIAGNOSTICS_TOPIC,
+          payload
+      )) {
+    Serial.println(
+        "Battery capacity diagnostic MQTT publish failed."
+    );
+    return;
+  }
+
+  Serial.printf(
+      "Battery capacity diagnostic published to %s (%d bytes):\n",
       BATTERY_DIAGNOSTICS_TOPIC,
       written
   );
