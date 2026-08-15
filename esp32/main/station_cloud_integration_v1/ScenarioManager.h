@@ -29,10 +29,8 @@ struct ScenarioProfile {
   float demandIndex = 0.65f;
   uint8_t requestedOutputCount = 2;
 
-  float trackingAngleDeg = 28.5f;
-  float trackingTargetAngleDeg = 30.0f;
-  uint16_t masterPositionRaw = 2040;
-  uint16_t slavePositionRaw = 2025;
+  float sunSensorRadiationWm2 = 780.0f;
+  float sunReferenceAngleDeg = 30.0f;
 
   const char* nominalOperatingMode = "M4";
 

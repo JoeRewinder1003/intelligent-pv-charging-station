@@ -17,6 +17,9 @@
 #include "MaintenanceController.h"
 #include "ScenarioManager.h"
 #include "PVSimulator.h"
+#include "TrackingGeometry.h"
+#include "TrackingController.h"
+#include "SunSensorEmulator.h"
 
 /*
  * AWS IoT connectivity and local command-validation test.
@@ -103,6 +106,9 @@ BatteryCapacityTestMonitor capacityTestMonitor;
 ActuatorEmulator masterActuator;
 ActuatorEmulator slaveActuator;
 TrackingSafetyMonitor trackingSafetyMonitor;
+TrackingGeometry trackingGeometry;
+SunSensorEmulator sunSensorEmulator;
+TrackingController trackingController;
 ActuatorSynchronizer actuatorSynchronizer;
 ActuatorStallMonitor actuatorStallMonitor;
 MaintenanceController maintenanceController;
@@ -192,6 +198,9 @@ void printTrackingSafetyStatus();
 void printActuatorSynchronizationStatus();
 void printActuatorStallStatus();
 void printMaintenanceStatus();
+void updateSunSensorEmulator();
+void printSunSensorStatus();
+void updateAutomaticTrackingController();
 
 bool getUtcTimestamp(char* buffer, size_t bufferSize);
 bool getTelemetryTimestamp(char* buffer, size_t bufferSize);
@@ -279,6 +288,9 @@ void setup() {
 void loop() {
   processSerialCommands();
   updateBatteryEmulator();
+
+  updateSunSensorEmulator();
+  updateAutomaticTrackingController();
   updateActuatorEmulators();
   updateTrackingSafety();
 
@@ -702,6 +714,261 @@ void processSerialCommands() {
     return;
   }
 
+  if (serialCommand == "TRACKING GEOMETRY STATUS") {
+    const ActuatorState& masterState =
+        masterActuator.state();
+
+    const ActuatorState& slaveState =
+        slaveActuator.state();
+
+    const float averagePositionMm =
+        (masterState.positionMm +
+        slaveState.positionMm) / 2.0f;
+
+    const float panelAngleDeg =
+        trackingGeometry.positionToAngleDeg(
+            averagePositionMm
+        );
+
+    Serial.println();
+    Serial.println("Tracking geometry status:");
+
+    Serial.printf(
+        "  Master position: %.2f mm\n",
+        masterState.positionMm
+    );
+
+    Serial.printf(
+        "  Slave position: %.2f mm\n",
+        slaveState.positionMm
+    );
+
+    Serial.printf(
+        "  Average position: %.2f mm\n",
+        averagePositionMm
+    );
+
+    if (isfinite(panelAngleDeg)) {
+      Serial.printf(
+          "  Panel angle: %.2f deg\n",
+          panelAngleDeg
+      );
+    } else {
+      Serial.println(
+          "  Panel angle: INVALID"
+      );
+    }
+
+    Serial.println();
+    return;
+  }
+
+  if (serialCommand == "TRACKING GEOMETRY TEST") {
+    const float positionsMm[] = {
+        0.0f,
+        150.0f,
+        300.0f
+    };
+
+    Serial.println();
+    Serial.println("Tracking geometry test:");
+
+    for (const float positionMm : positionsMm) {
+      const float angleDeg =
+          trackingGeometry.positionToAngleDeg(
+              positionMm
+          );
+
+      Serial.printf(
+          "  x = %.1f mm -> alpha = %.2f deg\n",
+          positionMm,
+          angleDeg
+      );
+    }
+
+    Serial.println();
+    return;
+  }
+
+  if (serialCommand == "TRACKING CONTROLLER TEST") {
+    Serial.println();
+    Serial.println("Tracking controller test:");
+
+    trackingController.reset();
+
+    trackingController.update(10.0f, true);
+
+    Serial.println("  Case 1 - Positive error:");
+    Serial.printf(
+        "    Angle Y: %.2f deg\n",
+        trackingController.state().angleYDeg
+    );
+    Serial.printf(
+        "    Command: %s\n",
+        trackingController.state().command ==
+                ActuatorCommand::EXTEND
+            ? "EXTEND"
+            : trackingController.state().command ==
+                      ActuatorCommand::RETRACT
+                  ? "RETRACT"
+                  : "STOP"
+    );
+
+    trackingController.update(0.3f, true);
+
+    Serial.println("  Case 2 - Inside stop threshold:");
+    Serial.printf(
+        "    Angle Y: %.2f deg\n",
+        trackingController.state().angleYDeg
+    );
+    Serial.printf(
+        "    Command: %s\n",
+        trackingController.state().command ==
+                ActuatorCommand::EXTEND
+            ? "EXTEND"
+            : trackingController.state().command ==
+                      ActuatorCommand::RETRACT
+                  ? "RETRACT"
+                  : "STOP"
+    );
+
+    trackingController.update(-10.0f, true);
+
+    Serial.println("  Case 3 - Negative error:");
+    Serial.printf(
+        "    Angle Y: %.2f deg\n",
+        trackingController.state().angleYDeg
+    );
+    Serial.printf(
+        "    Command: %s\n",
+        trackingController.state().command ==
+                ActuatorCommand::EXTEND
+            ? "EXTEND"
+            : trackingController.state().command ==
+                      ActuatorCommand::RETRACT
+                  ? "RETRACT"
+                  : "STOP"
+    );
+
+    trackingController.update(0.0f, false);
+
+    Serial.println("  Case 4 - Invalid measurement:");
+    Serial.printf(
+        "    Command: %s\n",
+        trackingController.state().command ==
+                ActuatorCommand::EXTEND
+            ? "EXTEND"
+            : trackingController.state().command ==
+                      ActuatorCommand::RETRACT
+                  ? "RETRACT"
+                  : "STOP"
+    );
+
+    Serial.println();
+    return;
+  }
+
+  if (serialCommand == "SUN SENSOR TEST") {
+    Serial.println();
+    Serial.println("Sun sensor emulator test:");
+
+    // Case 1: sufficient radiation and Sun inside FOV.
+    sunSensorEmulator.update(
+        500.0f,
+        30.0f,
+        25.0f
+    );
+
+    const SunSensorState validState =
+        sunSensorEmulator.state();
+
+    Serial.println("  Case 1 - Valid measurement:");
+    Serial.printf(
+        "    Radiation: %.1f W/m2\n",
+        validState.radiationWm2
+    );
+    Serial.printf(
+        "    Angle Y: %.2f deg\n",
+        validState.angleYDeg
+    );
+    Serial.printf(
+        "    Radiation enough: %s\n",
+        validState.radiationEnough ? "true" : "false"
+    );
+    Serial.printf(
+        "    Sun in FOV: %s\n",
+        validState.sunInFieldOfView ? "true" : "false"
+    );
+    Serial.printf(
+        "    Measurement valid: %s\n",
+        validState.measurementValid ? "true" : "false"
+    );
+
+    // Case 2: insufficient radiation.
+    sunSensorEmulator.update(
+        250.0f,
+        30.0f,
+        25.0f
+    );
+
+    const SunSensorState lowRadiationState =
+        sunSensorEmulator.state();
+
+    Serial.println("  Case 2 - Insufficient radiation:");
+    Serial.printf(
+        "    Radiation: %.1f W/m2\n",
+        lowRadiationState.radiationWm2
+    );
+    Serial.printf(
+        "    Angle Y: %.2f deg\n",
+        lowRadiationState.angleYDeg
+    );
+    Serial.printf(
+        "    Radiation enough: %s\n",
+        lowRadiationState.radiationEnough ? "true" : "false"
+    );
+    Serial.printf(
+        "    Measurement valid: %s\n",
+        lowRadiationState.measurementValid ? "true" : "false"
+    );
+
+    // Case 3: sufficient radiation but Sun outside FOV.
+    sunSensorEmulator.update(
+        500.0f,
+        90.0f,
+        20.0f
+    );
+
+    const SunSensorState outOfFovState =
+        sunSensorEmulator.state();
+
+    Serial.println("  Case 3 - Sun outside FOV:");
+    Serial.printf(
+        "    Radiation: %.1f W/m2\n",
+        outOfFovState.radiationWm2
+    );
+    Serial.printf(
+        "    Angle Y: %.2f deg\n",
+        outOfFovState.angleYDeg
+    );
+    Serial.printf(
+        "    Sun in FOV: %s\n",
+        outOfFovState.sunInFieldOfView ? "true" : "false"
+    );
+    Serial.printf(
+        "    Measurement valid: %s\n",
+        outOfFovState.measurementValid ? "true" : "false"
+    );
+
+    Serial.println();
+    return;
+  }
+
+  if (serialCommand == "SUN SENSOR STATUS") {
+    printSunSensorStatus();
+    return;
+  }
+
   if (serialCommand == "MAINTENANCE ENTER") {
     requestedActuatorCommand = ActuatorCommand::STOP;
     maintenanceController.enterMaintenance();
@@ -1105,6 +1372,11 @@ void printSerialHelp() {
   Serial.println("  TRACKING SAFETY STATUS");
   Serial.println("  TRACKING SAFETY TEST MISMATCH");
   Serial.println("  TRACKING SAFETY RESET");
+  Serial.println("  TRACKING GEOMETRY STATUS");
+  Serial.println("  TRACKING GEOMETRY TEST");
+  Serial.println("  TRACKING CONTROLLER TEST");
+  Serial.println("  SUN SENSOR TEST");
+  Serial.println("  SUN SENSOR STATUS");
   Serial.println("  HELP");
 }
 
@@ -1527,6 +1799,47 @@ void printMaintenanceStatus() {
   Serial.println();
 }
 
+void printSunSensorStatus() {
+  const SunSensorState& sensorState =
+      sunSensorEmulator.state();
+
+  Serial.println();
+  Serial.println("Sun sensor emulator status:");
+
+  Serial.printf(
+      "  Radiation: %.1f W/m2\n",
+      sensorState.radiationWm2
+  );
+
+  Serial.printf(
+      "  Angle Y: %.2f deg\n",
+      sensorState.angleYDeg
+  );
+
+  Serial.printf(
+      "  Radiation enough: %s\n",
+      sensorState.radiationEnough
+          ? "true"
+          : "false"
+  );
+
+  Serial.printf(
+      "  Sun in FOV: %s\n",
+      sensorState.sunInFieldOfView
+          ? "true"
+          : "false"
+  );
+
+  Serial.printf(
+      "  Measurement valid: %s\n",
+      sensorState.measurementValid
+          ? "true"
+          : "false"
+  );
+
+  Serial.println();
+}
+
 void applyScenarioInitialConditions() {
   const ScenarioProfile& scenario = scenarioManager.profile();
 
@@ -1800,6 +2113,69 @@ void updateTrackingSafety() {
     masterActuator.setCommand(ActuatorCommand::STOP);
     slaveActuator.setCommand(ActuatorCommand::STOP);
   }
+}
+
+void updateAutomaticTrackingController() {
+    // Maintenance mode gives actuator control to the technician.
+    // Do not overwrite manual actuator commands.
+    if (maintenanceController.maintenanceModeActive()) {
+      trackingController.reset();
+      return;
+    }
+
+    const char* operatingMode =
+        currentTestOperatingMode();
+
+    const bool automaticTrackingPermitted =
+        modeAllowsTracking(operatingMode) &&
+        maintenanceController.automaticTrackingAllowed() &&
+        trackingSafetyMonitor.movementAllowed() &&
+        !isCriticalSafetyActive() &&
+        !scenarioManager.isTrackingFaultActive();
+
+    if (!automaticTrackingPermitted) {
+      trackingController.reset();
+      requestedActuatorCommand =
+          ActuatorCommand::STOP;
+      return;
+    }
+
+    const SunSensorState& sensorState =
+        sunSensorEmulator.state();
+
+    trackingController.update(
+        sensorState.angleYDeg,
+        sensorState.measurementValid
+    );
+
+    requestedActuatorCommand =
+        trackingController.state().command;
+  }
+
+void updateSunSensorEmulator() {
+  const ScenarioProfile& scenario =
+      scenarioManager.profile();
+
+  const ActuatorState& masterState =
+      masterActuator.state();
+
+  const ActuatorState& slaveState =
+      slaveActuator.state();
+
+  const float averagePositionMm =
+      (masterState.positionMm +
+       slaveState.positionMm) / 2.0f;
+
+  const float panelAngleDeg =
+      trackingGeometry.positionToAngleDeg(
+          averagePositionMm
+      );
+
+  sunSensorEmulator.update(
+      scenario.sunSensorRadiationWm2,
+      scenario.sunReferenceAngleDeg,
+      panelAngleDeg
+  );
 }
 
 bool isCriticalSafetyActive() {
@@ -2153,10 +2529,26 @@ void publishTelemetry() {
   const BatteryState& battery = batteryEmulator.state();
   const PVState& pv = pvSimulator.state();
   const ScenarioProfile& scenario = scenarioManager.profile();
+  const ActuatorState& masterActuatorState =
+      masterActuator.state();
+
+  const ActuatorState& slaveActuatorState =
+      slaveActuator.state();
+
+  const float averageActuatorPositionMm =
+      (masterActuatorState.positionMm +
+      slaveActuatorState.positionMm) / 2.0f;
+
+  const float trackingAngleDeg =
+      trackingGeometry.positionToAngleDeg(
+          averageActuatorPositionMm
+      );
 
   const char* operatingMode = currentTestOperatingMode();
   const TrackingSafetyState& trackingSafetyState =
       trackingSafetyMonitor.state();
+  const SunSensorState& sunSensorState =
+      sunSensorEmulator.state();
 
   const char* trackingSafetyFault =
       trackingSafetyFaultToString(trackingSafetyState.fault);
@@ -2164,6 +2556,7 @@ void publishTelemetry() {
       modeAllowsTracking(operatingMode) &&
       maintenanceController.automaticTrackingAllowed() &&
       trackingSafetyMonitor.movementAllowed() &&
+      sunSensorState.measurementValid &&
       !isCriticalSafetyActive() &&
       !scenarioManager.isTrackingFaultActive();
   const AppliedOutputState appliedOutputs =
@@ -2228,9 +2621,13 @@ void publishTelemetry() {
           "\"enabled\":%s,"
           "\"safety_fault\":\"%s\","
           "\"angle_deg\":%.2f,"
-          "\"target_angle_deg\":%.2f,"
-          "\"master_position_raw\":%u,"
-          "\"slave_position_raw\":%u"
+          "\"sun_sensor_angle_y_deg\":%.2f,"
+          "\"sun_sensor_radiation_wm2\":%.1f,"
+          "\"sun_sensor_radiation_enough\":%s,"
+          "\"sun_sensor_in_fov\":%s,"
+          "\"sun_sensor_measurement_valid\":%s,"
+          "\"master_position_mm\":%.2f,"
+          "\"slave_position_mm\":%.2f"
         "},"
         "\"decision\":{"
           "\"weather_index\":%.3f,"
@@ -2282,10 +2679,14 @@ void publishTelemetry() {
       output3Active ? 1.60 : 0.0,
       trackingEnabled ? "true" : "false",
       trackingSafetyFault,
-      scenario.trackingAngleDeg,
-      scenario.trackingTargetAngleDeg,
-      static_cast<unsigned int>(scenario.masterPositionRaw),
-      static_cast<unsigned int>(scenario.slavePositionRaw),
+      trackingAngleDeg,
+      sunSensorState.angleYDeg,
+      sunSensorState.radiationWm2,
+      sunSensorState.radiationEnough ? "true" : "false",
+      sunSensorState.sunInFieldOfView ? "true" : "false",
+      sunSensorState.measurementValid ? "true" : "false",
+      masterActuatorState.positionMm,
+      slaveActuatorState.positionMm,
       scenario.weatherIndex,
       scenario.demandIndex,
       nominalMode,
