@@ -2032,6 +2032,9 @@ void applyScenarioInitialConditions() {
       scenario.pvAvailabilityFactor
   );
   manualBatteryPowerOverride = false;
+
+  batteryHealthIndicator.reset();
+  previousBatteryHealthSampleAvailable = false;
 }
 
 void updateBatteryEmulator() {
