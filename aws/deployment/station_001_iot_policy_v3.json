@@ -1,0 +1,42 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowDeviceConnect",
+      "Effect": "Allow",
+      "Action": "iot:Connect",
+      "Resource": "arn:aws:iot:us-east-2:188343045050:client/station_001"
+    },
+    {
+      "Sid": "AllowDevicePublish",
+      "Effect": "Allow",
+      "Action": "iot:Publish",
+      "Resource": [
+        "arn:aws:iot:us-east-2:188343045050:topic/station/station_001/telemetry",
+        "arn:aws:iot:us-east-2:188343045050:topic/station/station_001/status",
+        "arn:aws:iot:us-east-2:188343045050:topic/station/station_001/faults",
+        "arn:aws:iot:us-east-2:188343045050:topic/station/station_001/acks",
+        "arn:aws:iot:us-east-2:188343045050:topic/station/station_001/battery_diagnostics",
+        "arn:aws:iot:us-east-2:188343045050:topic/station/station_001/actuator_diagnostics"
+      ]
+    },
+    {
+      "Sid": "AllowDeviceSubscribe",
+      "Effect": "Allow",
+      "Action": "iot:Subscribe",
+      "Resource": [
+        "arn:aws:iot:us-east-2:188343045050:topicfilter/station/station_001/commands",
+        "arn:aws:iot:us-east-2:188343045050:topicfilter/station/station_001/config"
+      ]
+    },
+    {
+      "Sid": "AllowDeviceReceive",
+      "Effect": "Allow",
+      "Action": "iot:Receive",
+      "Resource": [
+        "arn:aws:iot:us-east-2:188343045050:topic/station/station_001/commands",
+        "arn:aws:iot:us-east-2:188343045050:topic/station/station_001/config"
+      ]
+    }
+  ]
+}

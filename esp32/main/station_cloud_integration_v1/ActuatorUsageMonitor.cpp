@@ -7,8 +7,9 @@ namespace {
 constexpr float STROKE_LENGTH_MM = 300.0f;
 
 // Design parameter for monitoring only.
-// The actuator manufacturer specifies a 25% duty cycle
-// but does not define this 60-second observation window.
+// The actuator manufacturer specifies a 25% duty cycle,
+// while this 60-second observation window is defined
+// by the station monitoring implementation.
 constexpr float DUTY_CYCLE_WINDOW_SECONDS = 60.0f;
 
 constexpr float MAX_DUTY_CYCLE_PERCENT = 25.0f;
@@ -48,8 +49,7 @@ void ActuatorUsageMonitor::update(
     float positionMm
 ) {
   if (!isfinite(deltaTimeSeconds) ||
-      deltaTimeSeconds <= 0.0f ||
-      !isfinite(positionMm)) {
+      deltaTimeSeconds <= 0.0f) {
     return;
   }
 
@@ -58,6 +58,8 @@ void ActuatorUsageMonitor::update(
 
   state_.currentlyMoving = movingCommand;
 
+  // Operating time depends on the applied command,
+  // not on position-feedback validity.
   if (movingCommand) {
     state_.operatingTimeSeconds +=
         deltaTimeSeconds;
@@ -68,17 +70,29 @@ void ActuatorUsageMonitor::update(
     state_.movementStarts++;
   }
 
-  if (previousPositionAvailable_) {
-    const float travelMm =
-        fabsf(positionMm - previousPositionMm_);
+  // Travel distance requires valid position feedback.
+  if (isfinite(positionMm)) {
+    if (previousPositionAvailable_) {
+      const float travelMm =
+          fabsf(positionMm - previousPositionMm_);
 
-    state_.totalTravelMm += travelMm;
+      state_.totalTravelMm += travelMm;
+    }
+
+    previousPositionMm_ = positionMm;
+    previousPositionAvailable_ = true;
+  } else {
+    // Do not calculate a future distance jump across
+    // an interval with invalid position feedback.
+    previousPositionAvailable_ = false;
   }
 
   state_.equivalentFullStrokeCycles =
       state_.totalTravelMm /
       (2.0f * STROKE_LENGTH_MM);
 
+  // Duty-cycle timing remains valid even if position
+  // feedback is temporarily unavailable.
   dutyCycleWindowElapsedSeconds_ +=
       deltaTimeSeconds;
 
@@ -101,12 +115,11 @@ void ActuatorUsageMonitor::update(
         state_.lastDutyCyclePercent >
         MAX_DUTY_CYCLE_PERCENT;
 
+    state_.dutyCycleWindowSequence++;
+
     dutyCycleWindowElapsedSeconds_ = 0.0f;
     dutyCycleWindowOperatingSeconds_ = 0.0f;
   }
-
-  previousPositionMm_ = positionMm;
-  previousPositionAvailable_ = true;
 
   previousCommand_ = appliedCommand;
 }

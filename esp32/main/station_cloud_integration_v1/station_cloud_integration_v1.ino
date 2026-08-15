@@ -58,6 +58,9 @@ static constexpr char ACK_TOPIC[] =
 static constexpr char BATTERY_DIAGNOSTICS_TOPIC[] =
     "station/station_001/battery_diagnostics";
 
+static constexpr char ACTUATOR_DIAGNOSTICS_TOPIC[] =
+    "station/station_001/actuator_diagnostics";
+
 // ============================================================
 // Timing and test configuration
 // ============================================================
@@ -68,7 +71,8 @@ static constexpr unsigned long BATTERY_UPDATE_INTERVAL_MS = 1000;
 static constexpr unsigned long ACTUATOR_UPDATE_INTERVAL_MS = 100;
 static constexpr unsigned long MQTT_RETRY_INTERVAL_MS = 5000;
 static constexpr unsigned long ACK_RETRY_INTERVAL_MS = 2000;
-static constexpr time_t MIN_VALID_EPOCH = 1704067200;  // 2024-01-01 UTC
+static constexpr unsigned long ACTUATOR_DIAGNOSTICS_RETRY_INTERVAL_MS = 2000;
+static constexpr time_t MIN_VALID_EPOCH = 1767225600;  // 2026-01-01 UTC
 static constexpr time_t STALE_DATA_OFFSET_SECONDS = 60;
 
 static constexpr char RESTRICTED_TEST_MODE[] = "M2";
@@ -94,8 +98,10 @@ unsigned long lastTelemetryMs = 0;
 unsigned long lastBatteryUpdateMs = 0;
 unsigned long lastActuatorUpdateMs = 0;
 unsigned long lastMqttAttemptMs = 0;
+unsigned long lastActuatorDiagnosticsAttemptMs = 0;
 unsigned long lastAckAttemptMs = 0;
 uint32_t telemetryCounter = 0;
+uint32_t lastPublishedActuatorDiagnosticsSequence = 0;
 
 BatteryConfig batteryConfig;
 BatteryEmulator batteryEmulator(batteryConfig);
@@ -206,6 +212,7 @@ void printSunSensorStatus();
 void updateAutomaticTrackingController();
 void printActuatorUsageStatus();
 
+bool publishActuatorDiagnostics();
 bool getUtcTimestamp(char* buffer, size_t bufferSize);
 bool getTelemetryTimestamp(char* buffer, size_t bufferSize);
 bool modeAllowsTracking(const char* operatingMode);
@@ -338,6 +345,30 @@ void loop() {
     if (now - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
       lastTelemetryMs = now;
       publishTelemetry();
+    }
+    const ActuatorUsageState& masterUsage =
+        masterActuatorUsageMonitor.state();
+    const ActuatorUsageState& slaveUsage =
+        slaveActuatorUsageMonitor.state();
+
+    const uint32_t masterSequence =
+        masterUsage.dutyCycleWindowSequence;
+
+    const uint32_t slaveSequence =
+        slaveUsage.dutyCycleWindowSequence;
+
+    if (masterSequence == slaveSequence &&
+        masterSequence >
+            lastPublishedActuatorDiagnosticsSequence &&
+        now - lastActuatorDiagnosticsAttemptMs >=
+            ACTUATOR_DIAGNOSTICS_RETRY_INTERVAL_MS) {
+
+      lastActuatorDiagnosticsAttemptMs = now;
+
+      if (publishActuatorDiagnostics()) {
+        lastPublishedActuatorDiagnosticsSequence =
+            masterSequence;
+      }
     }
   }
 
@@ -535,6 +566,32 @@ void processSerialCommands() {
   serialCommand.toUpperCase();
 
   if (serialCommand.length() == 0) {
+    return;
+  }
+
+  if (serialCommand ==
+      "ACTUATOR DIAGNOSTICS PUBLISH") {
+
+    lastActuatorDiagnosticsAttemptMs = millis();
+
+    const uint32_t masterSequence =
+        masterActuatorUsageMonitor.state()
+            .dutyCycleWindowSequence;
+
+    const uint32_t slaveSequence =
+        slaveActuatorUsageMonitor.state()
+            .dutyCycleWindowSequence;
+
+    if (publishActuatorDiagnostics()) {
+      if (masterSequence == slaveSequence &&
+          masterSequence >
+              lastPublishedActuatorDiagnosticsSequence) {
+
+        lastPublishedActuatorDiagnosticsSequence =
+            masterSequence;
+      }
+    }
+
     return;
   }
 
@@ -1389,6 +1446,7 @@ void printSerialHelp() {
   Serial.println("  ACTUATOR STALL STATUS");
   Serial.println("  ACTUATOR TEST STALL SLAVE");
   Serial.println("  ACTUATOR USAGE STATUS");
+  Serial.println("  ACTUATOR DIAGNOSTICS PUBLISH");
   Serial.println("  TRACKING SAFETY STATUS");
   Serial.println("  TRACKING SAFETY TEST MISMATCH");
   Serial.println("  TRACKING SAFETY RESET");
@@ -2645,6 +2703,144 @@ void publishBatteryCapacityTest(
       written
   );
   Serial.println(payload);
+}
+
+bool publishActuatorDiagnostics() {
+  if (!mqttClient.connected()) {
+    Serial.println(
+        "Actuator diagnostics not published: MQTT is disconnected."
+    );
+    return false;
+  }
+
+  char timestamp[25];
+
+  if (!getUtcTimestamp(
+          timestamp,
+          sizeof(timestamp)
+      )) {
+    Serial.println(
+        "Actuator diagnostics not published: UTC time is not synchronized."
+    );
+    return false;
+  }
+
+  const ActuatorUsageState& masterUsage =
+      masterActuatorUsageMonitor.state();
+
+  const ActuatorUsageState& slaveUsage =
+      slaveActuatorUsageMonitor.state();
+
+  char payload[1024];
+
+  const int written = snprintf(
+      payload,
+      sizeof(payload),
+      "{"
+        "\"station_id\":\"%s\","
+        "\"timestamp\":\"%s\","
+        "\"master\":{"
+          "\"window_sequence\":%lu,"
+          "\"operating_time_s\":%.2f,"
+          "\"total_travel_mm\":%.2f,"
+          "\"movement_starts\":%lu,"
+          "\"equivalent_full_stroke_cycles\":%.4f,"
+          "\"duty_cycle_percent\":%.2f,"
+          "\"duty_cycle_window_available\":%s,"
+          "\"duty_cycle_exceeded\":%s"
+        "},"
+        "\"slave\":{"
+          "\"window_sequence\":%lu,"
+          "\"operating_time_s\":%.2f,"
+          "\"total_travel_mm\":%.2f,"
+          "\"movement_starts\":%lu,"
+          "\"equivalent_full_stroke_cycles\":%.4f,"
+          "\"duty_cycle_percent\":%.2f,"
+          "\"duty_cycle_window_available\":%s,"
+          "\"duty_cycle_exceeded\":%s"
+        "}"
+      "}",
+      AWS_IOT_CLIENT_ID,
+      timestamp,
+
+      static_cast<unsigned long>(
+          masterUsage.dutyCycleWindowSequence
+      ),
+      masterUsage.operatingTimeSeconds,
+      masterUsage.totalTravelMm,
+      static_cast<unsigned long>(
+          masterUsage.movementStarts
+      ),
+      masterUsage.equivalentFullStrokeCycles,
+      masterUsage.lastDutyCyclePercent,
+      masterUsage.dutyCycleWindowAvailable
+          ? "true"
+          : "false",
+      masterUsage.dutyCycleExceeded
+          ? "true"
+          : "false",
+
+      static_cast<unsigned long>(
+          slaveUsage.dutyCycleWindowSequence
+      ),
+      slaveUsage.operatingTimeSeconds,
+      slaveUsage.totalTravelMm,
+      static_cast<unsigned long>(
+          slaveUsage.movementStarts
+      ),
+      slaveUsage.equivalentFullStrokeCycles,
+      slaveUsage.lastDutyCyclePercent,
+      slaveUsage.dutyCycleWindowAvailable
+          ? "true"
+          : "false",
+      slaveUsage.dutyCycleExceeded
+          ? "true"
+          : "false"
+  );
+
+  if (written < 0) {
+    Serial.println(
+        "Actuator diagnostics JSON formatting error."
+    );
+    return false;
+  }
+
+  if (static_cast<size_t>(written) >=
+      sizeof(payload)) {
+    Serial.printf(
+        "Actuator diagnostics payload too large. "
+        "Required: %d bytes, available: %u bytes.\n",
+        written + 1,
+        static_cast<unsigned int>(sizeof(payload))
+    );
+    return false;
+  }
+
+  const bool published = mqttClient.publish(
+      ACTUATOR_DIAGNOSTICS_TOPIC,
+      reinterpret_cast<const uint8_t*>(payload),
+      static_cast<unsigned int>(written),
+      false
+  );
+
+  if (!published) {
+    Serial.print(
+        "Actuator diagnostics publication failed. "
+        "MQTT state: "
+    );
+    Serial.println(mqttClient.state());
+    return false;
+  }
+
+  Serial.printf(
+      "Actuator diagnostics published to %s "
+      "(%d bytes):\n%s\n",
+      ACTUATOR_DIAGNOSTICS_TOPIC,
+      written,
+      payload
+  );
+
+  return true;
 }
 
 void publishTelemetry() {

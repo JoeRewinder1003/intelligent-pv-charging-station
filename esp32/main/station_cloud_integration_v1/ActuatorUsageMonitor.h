@@ -17,6 +17,8 @@ struct ActuatorUsageState {
   float lastDutyCyclePercent = 0.0f;
   bool dutyCycleWindowAvailable = false;
   bool dutyCycleExceeded = false;
+
+  uint32_t dutyCycleWindowSequence = 0;
 };
 
 class ActuatorUsageMonitor {
