@@ -142,6 +142,16 @@ bool previousBatteryHealthSampleAvailable = false;
  */
 bool simulatedCriticalLockout = false;
 
+/*
+ * Cloud operating-mode override.
+ *
+ * Local safety always has higher priority.
+ * When inactive, the functional simulation uses the
+ * nominal operating mode defined by the active scenario.
+ */
+bool cloudOperatingModeActive = false;
+char cloudOperatingMode[8] = "";
+
 struct AppliedOutputState {
   bool output1Active = false;
   bool output2Active = false;
@@ -151,6 +161,7 @@ struct AppliedOutputState {
 
 struct PendingCommandAck {
   bool pending = false;
+  bool applied = false;
   char commandId[80] = "";
   char command[48] = "";
   char status[32] = "";
@@ -218,6 +229,7 @@ bool getTelemetryTimestamp(char* buffer, size_t bufferSize);
 bool modeAllowsTracking(const char* operatingMode);
 bool isAllowedCommand(const char* command);
 bool isSafetyReducingCommand(const char* command);
+bool applyCloudOperatingCommand(const char* command);
 bool copyText(char* destination, size_t destinationSize, const char* source);
 bool isCriticalSafetyActive();
 bool batteryOutputsAllowed();
@@ -244,7 +256,8 @@ void prepareCommandAck(
     const char* commandId,
     const char* command,
     const char* status,
-    const char* message
+    const char* message,
+    bool applied
 );
 
 void mqttCallback(char* topic, byte* payload, unsigned int length);
@@ -2425,7 +2438,9 @@ AppliedOutputState calculateAppliedOutputState() {
   }
 
   const uint8_t requestedCount =
-      scenarioManager.profile().requestedOutputCount;
+      cloudOperatingModeActive
+        ? maximumOutputCountForMode(cloudOperatingMode)
+        : scenarioManager.profile().requestedOutputCount;
 
   const uint8_t modeLimit =
       maximumOutputCountForMode(currentTestOperatingMode());
@@ -2480,6 +2495,51 @@ float calculateAutomaticBatteryPowerW() {
 // Command validation helpers
 // ============================================================
 
+bool applyCloudOperatingCommand(const char* command) {
+  if (command == nullptr || command[0] == '\0') {
+    return false;
+  }
+
+  /*
+   * AUTO and CLEAR_LOCKOUT release the cloud override.
+   * They do not bypass or clear local safety conditions.
+   */
+  if (strcmp(command, "AUTO") == 0 ||
+      strcmp(command, "CLEAR_LOCKOUT") == 0) {
+    cloudOperatingModeActive = false;
+    cloudOperatingMode[0] = '\0';
+    return true;
+  }
+
+  const char* targetMode = nullptr;
+
+  if (strcmp(command, "LOCKOUT") == 0) {
+    targetMode = "M0";
+  } else if (strcmp(command, "STOP") == 0) {
+    targetMode = "M1";
+  } else if (strcmp(command, "ENABLE_TRACKING") == 0) {
+    targetMode = "M2";
+  } else if (strcmp(command, "ENABLE_OUTPUT_1") == 0) {
+    targetMode = "M3";
+  } else if (strcmp(command, "ENABLE_OUTPUT_2") == 0) {
+    targetMode = "M4";
+  } else if (strcmp(command, "ENABLE_OUTPUT_3") == 0) {
+    targetMode = "M5";
+  } else {
+    return false;
+  }
+
+  if (!copyText(
+          cloudOperatingMode,
+          sizeof(cloudOperatingMode),
+          targetMode)) {
+    return false;
+  }
+
+  cloudOperatingModeActive = true;
+  return true;
+}
+
 bool isAllowedCommand(const char* command) {
   if (command == nullptr || command[0] == '\0') {
     return false;
@@ -2531,6 +2591,10 @@ const char* currentTestOperatingMode() {
 
   if (batteryEmulator.isRestricted()) {
     return RESTRICTED_TEST_MODE;
+  }
+
+  if (cloudOperatingModeActive) {
+    return cloudOperatingMode;
   }
 
   return scenarioManager.nominalOperatingMode();
@@ -3138,7 +3202,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         commandId,
         "UNKNOWN",
         "invalid_command",
-        "Command name is missing; no physical action executed."
+        "Command name is missing; no simulated action was applied.",
+        false
     );
     return;
   }
@@ -3148,7 +3213,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         commandId,
         command,
         "invalid_command",
-        "Command is not in the local allowed-command list; no physical action executed."
+        "Command is not in the local allowed-command list; no simulated action was applied.",
+        false
     );
     return;
   }
@@ -3158,7 +3224,22 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         commandId,
         command,
         "blocked_by_safety",
-        "Command blocked by a local critical safety condition; no physical action executed."
+        "Command blocked by a local critical safety condition; no simulated action was applied.",
+        false
+    );
+    return;
+  }
+
+  const bool applied =
+      applyCloudOperatingCommand(command);
+
+  if (!applied) {
+    prepareCommandAck(
+        commandId,
+        command,
+        "accepted",
+        "Command recognized but not mapped to an operating-mode action.",
+        false
     );
     return;
   }
@@ -3167,7 +3248,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       commandId,
       command,
       "accepted",
-      "Command accepted by local validation; no physical action executed."
+      "Command applied to the functional simulation.",
+      true
   );
 }
 
@@ -3175,7 +3257,8 @@ void prepareCommandAck(
     const char* commandId,
     const char* command,
     const char* status,
-    const char* message
+    const char* message,
+    bool applied
 ) {
   if (!copyText(
           pendingAck.commandId,
@@ -3201,6 +3284,7 @@ void prepareCommandAck(
     return;
   }
 
+  pendingAck.applied = applied;
   pendingAck.pending = true;
   lastAckAttemptMs = millis() - ACK_RETRY_INTERVAL_MS;
 
@@ -3208,8 +3292,8 @@ void prepareCommandAck(
   Serial.printf("Command ID: %s\n", pendingAck.commandId);
   Serial.printf("Command: %s\n", pendingAck.command);
   Serial.printf("ACK status: %s\n", pendingAck.status);
-  Serial.println("Applied: false");
-  Serial.println("No physical action was executed.");
+  Serial.printf("Applied: %s\n", pendingAck.applied ? "true" : "false");
+  Serial.println(pendingAck.message);
   Serial.println("----------------------------------------");
 }
 
@@ -3241,7 +3325,7 @@ void publishPendingCommandAck() {
   ackDocument["command_id"] = pendingAck.commandId;
   ackDocument["command"] = pendingAck.command;
   ackDocument["status"] = pendingAck.status;
-  ackDocument["applied"] = false;
+  ackDocument["applied"] = pendingAck.applied;
   ackDocument["resulting_operating_mode"] =
       pendingAck.resultingOperatingMode;
   ackDocument["message"] = pendingAck.message;
@@ -3291,6 +3375,7 @@ void publishPendingCommandAck() {
   );
 
   pendingAck.pending = false;
+  pendingAck.applied = false;
   pendingAck.commandId[0] = '\0';
   pendingAck.command[0] = '\0';
   pendingAck.status[0] = '\0';
