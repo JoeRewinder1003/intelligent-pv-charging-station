@@ -20,6 +20,7 @@
 #include "TrackingGeometry.h"
 #include "TrackingController.h"
 #include "SunSensorEmulator.h"
+#include "ActuatorUsageMonitor.h"
 
 /*
  * AWS IoT connectivity and local command-validation test.
@@ -105,6 +106,8 @@ BatteryCapacityTestMonitor capacityTestMonitor;
 
 ActuatorEmulator masterActuator;
 ActuatorEmulator slaveActuator;
+ActuatorUsageMonitor masterActuatorUsageMonitor;
+ActuatorUsageMonitor slaveActuatorUsageMonitor;
 TrackingSafetyMonitor trackingSafetyMonitor;
 TrackingGeometry trackingGeometry;
 SunSensorEmulator sunSensorEmulator;
@@ -201,6 +204,7 @@ void printMaintenanceStatus();
 void updateSunSensorEmulator();
 void printSunSensorStatus();
 void updateAutomaticTrackingController();
+void printActuatorUsageStatus();
 
 bool getUtcTimestamp(char* buffer, size_t bufferSize);
 bool getTelemetryTimestamp(char* buffer, size_t bufferSize);
@@ -279,6 +283,16 @@ void setup() {
 
   connectMqtt();
   printSimulatedSafetyState();
+
+  masterActuatorUsageMonitor.reset(
+      masterActuator.state().positionMm
+  );
+
+  slaveActuatorUsageMonitor.reset(
+      slaveActuator.state().positionMm
+  );
+
+  lastActuatorUpdateMs = millis();
 }
 
 // ============================================================
@@ -637,6 +651,11 @@ void processSerialCommands() {
     );
 
     printActuatorStatus();
+    return;
+  }
+
+  if (serialCommand == "ACTUATOR USAGE STATUS") {
+    printActuatorUsageStatus();
     return;
   }
 
@@ -1369,6 +1388,7 @@ void printSerialHelp() {
   Serial.println("  ACTUATOR SYNC STATUS");
   Serial.println("  ACTUATOR STALL STATUS");
   Serial.println("  ACTUATOR TEST STALL SLAVE");
+  Serial.println("  ACTUATOR USAGE STATUS");
   Serial.println("  TRACKING SAFETY STATUS");
   Serial.println("  TRACKING SAFETY TEST MISMATCH");
   Serial.println("  TRACKING SAFETY RESET");
@@ -1799,6 +1819,109 @@ void printMaintenanceStatus() {
   Serial.println();
 }
 
+void printActuatorUsageStatus() {
+  const ActuatorUsageState& masterUsage =
+      masterActuatorUsageMonitor.state();
+
+  const ActuatorUsageState& slaveUsage =
+      slaveActuatorUsageMonitor.state();
+
+  Serial.println();
+  Serial.println("Actuator usage status:");
+
+  Serial.println("  Master actuator:");
+  Serial.printf(
+      "    Operating time: %.2f s\n",
+      masterUsage.operatingTimeSeconds
+  );
+  Serial.printf(
+      "    Total travel: %.2f mm\n",
+      masterUsage.totalTravelMm
+  );
+  Serial.printf(
+      "    Movement starts: %lu\n",
+      static_cast<unsigned long>(
+          masterUsage.movementStarts
+      )
+  );
+  Serial.printf(
+      "    Equivalent full-stroke cycles: %.4f\n",
+      masterUsage.equivalentFullStrokeCycles
+  );
+  Serial.printf(
+      "    Currently moving: %s\n",
+      masterUsage.currentlyMoving
+          ? "true"
+          : "false"
+  );
+
+  Serial.printf(
+      "    Last duty cycle: %.2f %%\n",
+      masterUsage.lastDutyCyclePercent
+  );
+
+  Serial.printf(
+      "    Duty cycle window available: %s\n",
+      masterUsage.dutyCycleWindowAvailable
+          ? "true"
+          : "false"
+  );
+
+  Serial.printf(
+      "    Duty cycle exceeded: %s\n",
+      masterUsage.dutyCycleExceeded
+          ? "true"
+          : "false"
+  );
+
+  Serial.println("  Slave actuator:");
+  Serial.printf(
+      "    Operating time: %.2f s\n",
+      slaveUsage.operatingTimeSeconds
+  );
+  Serial.printf(
+      "    Total travel: %.2f mm\n",
+      slaveUsage.totalTravelMm
+  );
+  Serial.printf(
+      "    Movement starts: %lu\n",
+      static_cast<unsigned long>(
+          slaveUsage.movementStarts
+      )
+  );
+  Serial.printf(
+      "    Equivalent full-stroke cycles: %.4f\n",
+      slaveUsage.equivalentFullStrokeCycles
+  );
+  Serial.printf(
+      "    Currently moving: %s\n",
+      slaveUsage.currentlyMoving
+          ? "true"
+          : "false"
+  );
+
+  Serial.printf(
+      "    Last duty cycle: %.2f %%\n",
+      slaveUsage.lastDutyCyclePercent
+  );
+
+  Serial.printf(
+      "    Duty cycle window available: %s\n",
+      slaveUsage.dutyCycleWindowAvailable
+          ? "true"
+          : "false"
+  );
+
+  Serial.printf(
+      "    Duty cycle exceeded: %s\n",
+      slaveUsage.dutyCycleExceeded
+          ? "true"
+          : "false"
+  );
+
+  Serial.println();
+}
+
 void printSunSensorStatus() {
   const SunSensorState& sensorState =
       sunSensorEmulator.state();
@@ -2065,6 +2188,18 @@ void updateActuatorEmulators() {
   const ActuatorState& updatedSlaveState =
       slaveActuator.state();
 
+  masterActuatorUsageMonitor.update(
+      deltaTimeSeconds,
+      appliedMasterCommand,
+      updatedMasterState.positionMm
+  );
+
+  slaveActuatorUsageMonitor.update(
+      deltaTimeSeconds,
+      appliedSlaveCommand,
+      updatedSlaveState.positionMm
+  );
+
   actuatorStallMonitor.update(
       deltaTimeSeconds,
       appliedMasterCommand,
@@ -2078,22 +2213,23 @@ void updateActuatorEmulators() {
   );
 
   const ActuatorStallState& stallState =
-    actuatorStallMonitor.state();
+      actuatorStallMonitor.state();
 
   trackingSafetyMonitor.reportActuatorStall(
-    stallState.masterStallDetected,
-    stallState.slaveStallDetected
+      stallState.masterStallDetected,
+      stallState.slaveStallDetected
   );
 
   if (!trackingSafetyMonitor.movementAllowed()) {
-    requestedActuatorCommand = ActuatorCommand::STOP;
+    requestedActuatorCommand =
+        ActuatorCommand::STOP;
 
     masterActuator.setCommand(
-      ActuatorCommand::STOP
+        ActuatorCommand::STOP
     );
 
     slaveActuator.setCommand(
-      ActuatorCommand::STOP
+        ActuatorCommand::STOP
     );
   }
 }
