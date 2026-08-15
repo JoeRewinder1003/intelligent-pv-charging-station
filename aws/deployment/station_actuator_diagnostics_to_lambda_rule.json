@@ -1,0 +1,12 @@
+{
+  "sql": "SELECT *, topic(2) AS station_id_from_topic, topic() AS mqtt_topic, timestamp() AS received_at_epoch_ms FROM 'station/+/actuator_diagnostics'",
+  "ruleDisabled": false,
+  "awsIotSqlVersion": "2016-03-23",
+  "actions": [
+    {
+      "lambda": {
+        "functionArn": "arn:aws:lambda:us-east-2:188343045050:function:actuator_life_estimator"
+      }
+    }
+  ]
+}
