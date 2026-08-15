@@ -10,6 +10,11 @@
 #include "BatteryEmulator.h"
 #include "BatteryHealthIndicator.h"
 #include "BatteryCapacityTest.h"
+#include "ActuatorEmulator.h"
+#include "ActuatorSynchronizer.h"
+#include "ActuatorStallMonitor.h"
+#include "TrackingSafetyMonitor.h"
+#include "MaintenanceController.h"
 #include "ScenarioManager.h"
 #include "PVSimulator.h"
 
@@ -56,6 +61,7 @@ static constexpr char BATTERY_DIAGNOSTICS_TOPIC[] =
 static constexpr uint16_t MQTT_PORT = 8883;
 static constexpr unsigned long TELEMETRY_INTERVAL_MS = 15000;
 static constexpr unsigned long BATTERY_UPDATE_INTERVAL_MS = 1000;
+static constexpr unsigned long ACTUATOR_UPDATE_INTERVAL_MS = 100;
 static constexpr unsigned long MQTT_RETRY_INTERVAL_MS = 5000;
 static constexpr unsigned long ACK_RETRY_INTERVAL_MS = 2000;
 static constexpr time_t MIN_VALID_EPOCH = 1704067200;  // 2024-01-01 UTC
@@ -82,6 +88,7 @@ PubSubClient mqttClient(secureClient);
 
 unsigned long lastTelemetryMs = 0;
 unsigned long lastBatteryUpdateMs = 0;
+unsigned long lastActuatorUpdateMs = 0;
 unsigned long lastMqttAttemptMs = 0;
 unsigned long lastAckAttemptMs = 0;
 uint32_t telemetryCounter = 0;
@@ -92,6 +99,15 @@ BatteryHealthIndicator batteryHealthIndicator;
 
 BatteryCapacityTestPlant capacityTestPlant;
 BatteryCapacityTestMonitor capacityTestMonitor;
+
+ActuatorEmulator masterActuator;
+ActuatorEmulator slaveActuator;
+TrackingSafetyMonitor trackingSafetyMonitor;
+ActuatorSynchronizer actuatorSynchronizer;
+ActuatorStallMonitor actuatorStallMonitor;
+MaintenanceController maintenanceController;
+ActuatorCommand requestedActuatorCommand =
+    ActuatorCommand::STOP;
 
 ScenarioManager scenarioManager;
 PVConfig pvConfig;
@@ -110,6 +126,13 @@ bool previousBatteryHealthSampleAvailable = false;
  * It does not drive any physical output.
  */
 bool simulatedCriticalLockout = false;
+
+struct AppliedOutputState {
+  bool output1Active = false;
+  bool output2Active = false;
+  bool output3Active = false;
+  uint8_t activeCount = 0;
+};
 
 struct PendingCommandAck {
   bool pending = false;
@@ -162,6 +185,13 @@ void printCapacityTestStatus();
 const char* capacityTestStateText(BatteryCapacityTestState state);
 void applyScenarioInitialConditions();
 void updateBatteryEmulator();
+void updateActuatorEmulators();
+void printActuatorStatus();
+void updateTrackingSafety();
+void printTrackingSafetyStatus();
+void printActuatorSynchronizationStatus();
+void printActuatorStallStatus();
+void printMaintenanceStatus();
 
 bool getUtcTimestamp(char* buffer, size_t bufferSize);
 bool getTelemetryTimestamp(char* buffer, size_t bufferSize);
@@ -172,10 +202,12 @@ bool copyText(char* destination, size_t destinationSize, const char* source);
 bool isCriticalSafetyActive();
 bool batteryOutputsAllowed();
 uint8_t maximumOutputCountForMode(const char* operatingMode);
+AppliedOutputState calculateAppliedOutputState();
 uint8_t currentActiveOutputCount();
 float calculateAutomaticBatteryPowerW();
 const char* currentTestOperatingMode();
 const char* currentFaultState();
+const char* trackingSafetyFaultToString(TrackingSafetyFault fault);
 
 void publishTelemetry();
 void publishPendingCommandAck();
@@ -247,6 +279,8 @@ void setup() {
 void loop() {
   processSerialCommands();
   updateBatteryEmulator();
+  updateActuatorEmulators();
+  updateTrackingSafety();
 
   if (WiFi.status() != WL_CONNECTED) {
     connectWiFi();
@@ -478,6 +512,366 @@ void processSerialCommands() {
     return;
   }
 
+  if (serialCommand == "ACTUATOR EXTEND") {
+    if (!maintenanceController.maintenanceModeActive()) {
+      Serial.println(
+        "Manual actuator control requires maintenance mode."
+      );
+      return;
+    }
+
+    if (maintenanceController.state().actuatorMovementLocked) {
+      Serial.println(
+        "Actuator movement blocked by technician lock."
+      );
+      return;
+    }
+    if (!trackingSafetyMonitor.movementAllowed()) {
+      Serial.println(
+          "Actuator movement blocked by tracking safety interlock."
+      );
+      return;
+    }
+
+    requestedActuatorCommand =
+      ActuatorCommand::EXTEND;
+
+    Serial.println("Actuators commanded to EXTEND.");
+    return;
+  }
+
+  if (serialCommand == "ACTUATOR RETRACT") {
+    if (!maintenanceController.maintenanceModeActive()) {
+      Serial.println(
+        "Manual actuator control requires maintenance mode."
+      );
+      return;
+    }
+
+    if (maintenanceController.state().actuatorMovementLocked) {
+      Serial.println(
+        "Actuator movement blocked by technician lock."
+      );
+      return;
+    }
+    if (!trackingSafetyMonitor.movementAllowed()) {
+      Serial.println(
+          "Actuator movement blocked by tracking safety interlock."
+      );
+      return;
+    }
+
+    requestedActuatorCommand =
+      ActuatorCommand::RETRACT;
+
+    Serial.println("Actuators commanded to RETRACT.");
+    return;
+  }
+
+  if (serialCommand == "ACTUATOR STOP") {
+    requestedActuatorCommand =
+      ActuatorCommand::STOP;
+
+    Serial.println("Actuators commanded to STOP.");
+    return;
+  }
+
+  if (serialCommand == "ACTUATOR STATUS") {
+    printActuatorStatus();
+    return;
+  }
+
+  if (serialCommand == "ACTUATOR TEST DESYNC") {
+    requestedActuatorCommand = ActuatorCommand::STOP;
+
+    masterActuator.reset(60.0f);
+    slaveActuator.reset(45.0f);
+
+    actuatorSynchronizer.reset();
+
+    Serial.println(
+        "Actuator desynchronization test prepared: "
+        "master = 60 mm, slave = 45 mm."
+    );
+
+    printActuatorStatus();
+    return;
+  }
+
+  if (serialCommand == "ACTUATOR SYNC STATUS") {
+    printActuatorSynchronizationStatus();
+    return;
+  }
+
+  if (serialCommand == "ACTUATOR STALL STATUS") {
+    printActuatorStallStatus();
+    return;
+  }
+
+  if (serialCommand == "ACTUATOR TEST STALL SLAVE") {
+    requestedActuatorCommand = ActuatorCommand::STOP;
+
+    masterActuator.reset(50.0f);
+    slaveActuator.reset(50.0f);
+
+    masterActuator.setStalled(false);
+    slaveActuator.setStalled(true);
+
+    actuatorSynchronizer.reset();
+    actuatorStallMonitor.reset();
+
+    Serial.println(
+      "Actuator stall test prepared: slave stalled at 50 mm."
+    );
+
+    printActuatorStatus();
+    return;
+  }
+
+  if (serialCommand == "TRACKING SAFETY STATUS") {
+    printTrackingSafetyStatus();
+    return;
+  }
+
+  if (serialCommand == "TRACKING SAFETY RESET") {
+    if (!maintenanceController.maintenanceModeActive()) {
+      Serial.println(
+          "Tracking safety reset requires maintenance mode."
+      );
+      return;
+    }
+
+    requestedActuatorCommand = ActuatorCommand::STOP;
+
+    masterActuator.setCommand(
+        ActuatorCommand::STOP
+    );
+
+    slaveActuator.setCommand(
+        ActuatorCommand::STOP
+    );
+
+    const ActuatorState& masterState =
+        masterActuator.state();
+
+    const ActuatorState& slaveState =
+        slaveActuator.state();
+
+    actuatorSynchronizer.reset();
+    actuatorStallMonitor.reset();
+
+    const bool resetSuccessful =
+        trackingSafetyMonitor.resetIfSafe(
+            masterState.positionMm,
+            true,
+            slaveState.positionMm,
+            true
+        );
+
+    if (resetSuccessful) {
+      Serial.println(
+          "Tracking safety fault reset by technician."
+      );
+    } else {
+      Serial.println(
+          "Tracking safety reset rejected: "
+          "actuator feedback is not safe."
+      );
+    }
+
+    printTrackingSafetyStatus();
+    return;
+  }
+
+  if (serialCommand == "TRACKING SAFETY TEST MISMATCH") {
+    const ActuatorState& masterState = masterActuator.state();
+    const ActuatorState& slaveState = slaveActuator.state();
+
+    trackingSafetyMonitor.update(
+        masterState.positionMm,
+        true,
+        slaveState.positionMm + 15.0f,
+        true
+    );
+
+    Serial.println(
+        "Tracking safety mismatch test injected: +15 mm on slave reading."
+    );
+
+    printTrackingSafetyStatus();
+    return;
+  }
+
+  if (serialCommand == "MAINTENANCE ENTER") {
+    requestedActuatorCommand = ActuatorCommand::STOP;
+    maintenanceController.enterMaintenance();
+
+    Serial.println("Maintenance mode entered.");
+    printMaintenanceStatus();
+    return;
+  }
+
+  if (serialCommand == "MAINTENANCE EXIT") {
+    requestedActuatorCommand = ActuatorCommand::STOP;
+    maintenanceController.exitMaintenance();
+
+    Serial.println("Maintenance mode exited.");
+    printMaintenanceStatus();
+    return;
+  }
+
+  if (serialCommand == "MAINTENANCE STATUS") {
+    printMaintenanceStatus();
+    return;
+  }
+
+  if (serialCommand == "MAINTENANCE LOCK ACTUATORS") {
+    if (!maintenanceController.maintenanceModeActive()) {
+      Serial.println(
+        "Actuator lock control requires maintenance mode."
+      );
+      return;
+    }
+
+    requestedActuatorCommand = ActuatorCommand::STOP;
+    maintenanceController.lockActuatorMovement();
+
+    Serial.println(
+      "Actuator movement locked by technician."
+    );
+
+    printMaintenanceStatus();
+    return;
+  }
+
+  if (serialCommand == "MAINTENANCE UNLOCK ACTUATORS") {
+    if (!maintenanceController.maintenanceModeActive()) {
+      Serial.println(
+        "Actuator lock control requires maintenance mode."
+      );
+      return;
+    }
+
+    maintenanceController.unlockActuatorMovement();
+
+    Serial.println(
+      "Actuator movement unlocked by technician."
+    );
+
+    printMaintenanceStatus();
+    return;
+  }
+
+  if (serialCommand == "MAINTENANCE LOCK OUTPUT 1") {
+    if (!maintenanceController.maintenanceModeActive()) {
+      Serial.println(
+        "Output lock control requires maintenance mode."
+      );
+      return;
+    }
+
+    maintenanceController.lockOutput(1);
+
+    Serial.println(
+      "Output 1 locked by technician."
+    );
+
+    printMaintenanceStatus();
+    return;
+  }
+
+  if (serialCommand == "MAINTENANCE UNLOCK OUTPUT 1") {
+    if (!maintenanceController.maintenanceModeActive()) {
+      Serial.println(
+        "Output lock control requires maintenance mode."
+      );
+      return;
+    }
+
+    maintenanceController.unlockOutput(1);
+
+    Serial.println(
+      "Output 1 unlocked by technician."
+    );
+
+    printMaintenanceStatus();
+    return;
+  }
+
+  if (serialCommand == "MAINTENANCE LOCK OUTPUT 2") {
+    if (!maintenanceController.maintenanceModeActive()) {
+      Serial.println(
+        "Output lock control requires maintenance mode."
+      );
+      return;
+    }
+
+    maintenanceController.lockOutput(2);
+
+    Serial.println(
+      "Output 2 locked by technician."
+    );
+
+    printMaintenanceStatus();
+    return;
+  }
+
+  if (serialCommand == "MAINTENANCE UNLOCK OUTPUT 2") {
+    if (!maintenanceController.maintenanceModeActive()) {
+      Serial.println(
+        "Output lock control requires maintenance mode."
+      );
+      return;
+    }
+
+    maintenanceController.unlockOutput(2);
+
+    Serial.println(
+      "Output 2 unlocked by technician."
+    );
+
+    printMaintenanceStatus();
+    return;
+  }
+
+  if (serialCommand == "MAINTENANCE LOCK OUTPUT 3") {
+    if (!maintenanceController.maintenanceModeActive()) {
+      Serial.println(
+        "Output lock control requires maintenance mode."
+      );
+      return;
+    }
+
+    maintenanceController.lockOutput(3);
+
+    Serial.println(
+      "Output 3 locked by technician."
+    );
+
+    printMaintenanceStatus();
+    return;
+  }
+
+  if (serialCommand == "MAINTENANCE UNLOCK OUTPUT 3") {
+    if (!maintenanceController.maintenanceModeActive()) {
+      Serial.println(
+        "Output lock control requires maintenance mode."
+      );
+      return;
+    }
+
+    maintenanceController.unlockOutput(3);
+
+    Serial.println(
+      "Output 3 unlocked by technician."
+    );
+
+    printMaintenanceStatus();
+    return;
+  }
+
+
+
   if (serialCommand == "SCENARIO STATUS") {
     printScenarioStatus();
     return;
@@ -681,6 +1075,17 @@ void printSerialHelp() {
   Serial.println("  CAPACITY TEST STATUS");
   Serial.println("  CAPACITY TEST ABORT");
   Serial.println("  CAPACITY TEST GROUND TRUTH <percent>");
+  Serial.println("  MAINTENANCE ENTER");
+  Serial.println("  MAINTENANCE EXIT");
+  Serial.println("  MAINTENANCE STATUS");
+  Serial.println("  MAINTENANCE LOCK ACTUATORS");
+  Serial.println("  MAINTENANCE UNLOCK ACTUATORS");
+  Serial.println("  MAINTENANCE LOCK OUTPUT 1");
+  Serial.println("  MAINTENANCE UNLOCK OUTPUT 1");
+  Serial.println("  MAINTENANCE LOCK OUTPUT 2");
+  Serial.println("  MAINTENANCE UNLOCK OUTPUT 2");
+  Serial.println("  MAINTENANCE LOCK OUTPUT 3");
+  Serial.println("  MAINTENANCE UNLOCK OUTPUT 3");
   Serial.println("  SAFETY ON");
   Serial.println("  SAFETY OFF");
   Serial.println("  PV STATUS");
@@ -689,6 +1094,17 @@ void printSerialHelp() {
   Serial.println("  BATTERY POWER <watts>");
   Serial.println("  BATTERY SOC <0-100>");
   Serial.println("  BATTERY SCALE <1-3600>");
+  Serial.println("  ACTUATOR EXTEND");
+  Serial.println("  ACTUATOR RETRACT");
+  Serial.println("  ACTUATOR STOP");
+  Serial.println("  ACTUATOR STATUS");
+  Serial.println("  ACTUATOR TEST DESYNC");
+  Serial.println("  ACTUATOR SYNC STATUS");
+  Serial.println("  ACTUATOR STALL STATUS");
+  Serial.println("  ACTUATOR TEST STALL SLAVE");
+  Serial.println("  TRACKING SAFETY STATUS");
+  Serial.println("  TRACKING SAFETY TEST MISMATCH");
+  Serial.println("  TRACKING SAFETY RESET");
   Serial.println("  HELP");
 }
 
@@ -745,6 +1161,68 @@ void printBatteryStatus() {
   Serial.println();
 }
 
+void printActuatorStatus() {
+  const ActuatorState& masterState = masterActuator.state();
+  const ActuatorState& slaveState = slaveActuator.state();
+
+  Serial.println();
+  Serial.println("Actuator emulator status:");
+
+  Serial.printf(
+      "  Master position: %.2f mm\n",
+      masterState.positionMm
+  );
+
+  Serial.printf(
+      "  Master moving: %s\n",
+      masterState.moving ? "true" : "false"
+  );
+
+  Serial.printf(
+      "  Slave position: %.2f mm\n",
+      slaveState.positionMm
+  );
+
+  Serial.printf(
+      "  Slave moving: %s\n",
+      slaveState.moving ? "true" : "false"
+  );
+
+  Serial.println();
+}
+
+void printTrackingSafetyStatus() {
+  const TrackingSafetyState& safetyState =
+      trackingSafetyMonitor.state();
+
+  Serial.println();
+  Serial.println("Tracking safety status:");
+
+  Serial.printf(
+      "  Fault latched: %s\n",
+      safetyState.faultLatched ? "true" : "false"
+  );
+
+  Serial.printf(
+    "  Fault: %s\n",
+    trackingSafetyFaultToString(safetyState.fault)
+  );
+
+  Serial.printf(
+      "  Position difference: %.2f mm\n",
+      safetyState.positionDifferenceMm
+  );
+
+  Serial.printf(
+      "  Movement allowed: %s\n",
+      trackingSafetyMonitor.movementAllowed()
+          ? "true"
+          : "false"
+  );
+
+  Serial.println();
+}
+
 void printPvStatus() {
   const PVState& pv = pvSimulator.state();
 
@@ -791,6 +1269,39 @@ const char* capacityTestStateText(BatteryCapacityTestState state) {
 
     case BatteryCapacityTestState::ABORTED:
       return "ABORTED";
+
+    default:
+      return "UNKNOWN";
+  }
+}
+
+const char* trackingSafetyFaultToString(
+  TrackingSafetyFault fault
+) {
+  switch (fault) {
+    case TrackingSafetyFault::NONE:
+      return "NONE";
+
+    case TrackingSafetyFault::MASTER_POSITION_INVALID:
+      return "MASTER_POSITION_INVALID";
+
+    case TrackingSafetyFault::SLAVE_POSITION_INVALID:
+      return "SLAVE_POSITION_INVALID";
+
+    case TrackingSafetyFault::MASTER_POSITION_OUT_OF_RANGE:
+      return "MASTER_POSITION_OUT_OF_RANGE";
+
+    case TrackingSafetyFault::SLAVE_POSITION_OUT_OF_RANGE:
+      return "SLAVE_POSITION_OUT_OF_RANGE";
+
+    case TrackingSafetyFault::POSITION_MISMATCH:
+      return "POSITION_MISMATCH";
+
+    case TrackingSafetyFault::MASTER_ACTUATOR_STALL:
+      return "MASTER_ACTUATOR_STALL";
+
+    case TrackingSafetyFault::SLAVE_ACTUATOR_STALL:
+      return "SLAVE_ACTUATOR_STALL";
 
     default:
       return "UNKNOWN";
@@ -845,6 +1356,85 @@ void printCapacityTestStatus() {
   Serial.println();
 }
 
+void printActuatorSynchronizationStatus() {
+  const ActuatorSynchronizationState& syncState =
+      actuatorSynchronizer.state();
+
+  Serial.println();
+  Serial.println("Actuator synchronization status:");
+
+  Serial.printf(
+      "  Correction active: %s\n",
+      syncState.correctionActive ? "true" : "false"
+  );
+
+  Serial.printf(
+      "  Position difference: %.2f mm\n",
+      syncState.positionDifferenceMm
+  );
+
+  const char* masterCommandText = "STOP";
+  const char* slaveCommandText = "STOP";
+
+  if (syncState.masterCommand == ActuatorCommand::EXTEND) {
+    masterCommandText = "EXTEND";
+  } else if (
+      syncState.masterCommand == ActuatorCommand::RETRACT
+  ) {
+    masterCommandText = "RETRACT";
+  }
+
+  if (syncState.slaveCommand == ActuatorCommand::EXTEND) {
+    slaveCommandText = "EXTEND";
+  } else if (
+      syncState.slaveCommand == ActuatorCommand::RETRACT
+  ) {
+    slaveCommandText = "RETRACT";
+  }
+
+  Serial.printf(
+      "  Master command: %s\n",
+      masterCommandText
+  );
+
+  Serial.printf(
+      "  Slave command: %s\n",
+      slaveCommandText
+  );
+
+  Serial.println();
+}
+
+void printActuatorStallStatus() {
+  const ActuatorStallState& stallState =
+      actuatorStallMonitor.state();
+
+  Serial.println();
+  Serial.println("Actuator stall status:");
+
+  Serial.printf(
+      "  Master stall detected: %s\n",
+      stallState.masterStallDetected ? "true" : "false"
+  );
+
+  Serial.printf(
+      "  Master observed change: %.2f mm\n",
+      stallState.masterObservedChangeMm
+  );
+
+  Serial.printf(
+      "  Slave stall detected: %s\n",
+      stallState.slaveStallDetected ? "true" : "false"
+  );
+
+  Serial.printf(
+      "  Slave observed change: %.2f mm\n",
+      stallState.slaveObservedChangeMm
+  );
+
+  Serial.println();
+}
+
 void printScenarioStatus() {
   const ScenarioProfile& profile = scenarioManager.profile();
 
@@ -883,6 +1473,57 @@ void printScenarioStatus() {
       profile.trackingFault ? "true" : "false",
       profile.staleData ? "true" : "false"
   );
+  Serial.println();
+}
+
+void printMaintenanceStatus() {
+  const MaintenanceState& maintenanceState =
+    maintenanceController.state();
+
+  Serial.println();
+  Serial.println("Maintenance status:");
+
+  Serial.printf(
+    "  Control mode: %s\n",
+    maintenanceState.controlMode == StationControlMode::MAINTENANCE
+      ? "MAINTENANCE"
+      : "AUTOMATIC"
+  );
+
+  Serial.printf(
+    "  Actuator movement locked: %s\n",
+    maintenanceState.actuatorMovementLocked ? "true" : "false"
+  );
+
+  Serial.printf(
+    "  Output 1 locked: %s\n",
+    maintenanceState.output1Locked ? "true" : "false"
+  );
+
+  Serial.printf(
+    "  Output 2 locked: %s\n",
+    maintenanceState.output2Locked ? "true" : "false"
+  );
+
+  Serial.printf(
+    "  Output 3 locked: %s\n",
+    maintenanceState.output3Locked ? "true" : "false"
+  );
+
+  Serial.printf(
+    "  Manual actuator control allowed: %s\n",
+    maintenanceController.manualActuatorControlAllowed()
+      ? "true"
+      : "false"
+  );
+
+  Serial.printf(
+    "  Automatic tracking allowed: %s\n",
+    maintenanceController.automaticTrackingAllowed()
+      ? "true"
+      : "false"
+  );
+
   Serial.println();
 }
 
@@ -1038,6 +1679,129 @@ void updateBatteryEmulator() {
   previousBatteryHealthSampleAvailable = true;
 }
 
+void updateActuatorEmulators() {
+  const unsigned long now = millis();
+
+  if (now - lastActuatorUpdateMs <
+      ACTUATOR_UPDATE_INTERVAL_MS) {
+    return;
+  }
+
+  const unsigned long elapsedMs =
+      now - lastActuatorUpdateMs;
+
+  lastActuatorUpdateMs = now;
+
+  const float deltaTimeSeconds =
+      static_cast<float>(elapsedMs) / 1000.0f;
+
+  const ActuatorState& masterState =
+      masterActuator.state();
+
+  const ActuatorState& slaveState =
+      slaveActuator.state();
+
+  ActuatorCommand appliedMasterCommand =
+      ActuatorCommand::STOP;
+
+  ActuatorCommand appliedSlaveCommand =
+      ActuatorCommand::STOP;
+
+  if (!trackingSafetyMonitor.movementAllowed()) {
+    requestedActuatorCommand =
+        ActuatorCommand::STOP;
+
+    masterActuator.setCommand(
+        ActuatorCommand::STOP
+    );
+
+    slaveActuator.setCommand(
+        ActuatorCommand::STOP
+    );
+  } else {
+    actuatorSynchronizer.update(
+        requestedActuatorCommand,
+        masterState.positionMm,
+        slaveState.positionMm
+    );
+
+    const ActuatorSynchronizationState& syncState =
+        actuatorSynchronizer.state();
+
+    appliedMasterCommand =
+        syncState.masterCommand;
+
+    appliedSlaveCommand =
+        syncState.slaveCommand;
+
+    masterActuator.setCommand(
+        appliedMasterCommand
+    );
+
+    slaveActuator.setCommand(
+        appliedSlaveCommand
+    );
+  }
+
+  masterActuator.update(deltaTimeSeconds);
+  slaveActuator.update(deltaTimeSeconds);
+
+  const ActuatorState& updatedMasterState =
+      masterActuator.state();
+
+  const ActuatorState& updatedSlaveState =
+      slaveActuator.state();
+
+  actuatorStallMonitor.update(
+      deltaTimeSeconds,
+      appliedMasterCommand,
+      updatedMasterState.positionMm,
+      updatedMasterState.atMinimumLimit,
+      updatedMasterState.atMaximumLimit,
+      appliedSlaveCommand,
+      updatedSlaveState.positionMm,
+      updatedSlaveState.atMinimumLimit,
+      updatedSlaveState.atMaximumLimit
+  );
+
+  const ActuatorStallState& stallState =
+    actuatorStallMonitor.state();
+
+  trackingSafetyMonitor.reportActuatorStall(
+    stallState.masterStallDetected,
+    stallState.slaveStallDetected
+  );
+
+  if (!trackingSafetyMonitor.movementAllowed()) {
+    requestedActuatorCommand = ActuatorCommand::STOP;
+
+    masterActuator.setCommand(
+      ActuatorCommand::STOP
+    );
+
+    slaveActuator.setCommand(
+      ActuatorCommand::STOP
+    );
+  }
+}
+
+void updateTrackingSafety() {
+  const ActuatorState& masterState = masterActuator.state();
+  const ActuatorState& slaveState = slaveActuator.state();
+
+  trackingSafetyMonitor.update(
+      masterState.positionMm,
+      true,
+      slaveState.positionMm,
+      true
+  );
+
+  if (!trackingSafetyMonitor.movementAllowed()) {
+    masterActuator.setCommand(ActuatorCommand::STOP);
+    slaveActuator.setCommand(ActuatorCommand::STOP);
+  }
+}
+
 bool isCriticalSafetyActive() {
   return simulatedCriticalLockout ||
          batteryEmulator.isCritical() ||
@@ -1080,17 +1844,50 @@ bool modeAllowsTracking(const char* operatingMode) {
          strcmp(operatingMode, "M5") == 0;
 }
 
-uint8_t currentActiveOutputCount() {
+AppliedOutputState calculateAppliedOutputState() {
+  AppliedOutputState appliedState;
+
   if (!batteryOutputsAllowed()) {
-    return 0;
+    return appliedState;
   }
 
   const uint8_t requestedCount =
       scenarioManager.profile().requestedOutputCount;
+
   const uint8_t modeLimit =
       maximumOutputCountForMode(currentTestOperatingMode());
 
-  return requestedCount < modeLimit ? requestedCount : modeLimit;
+  const uint8_t targetCount =
+      requestedCount < modeLimit
+          ? requestedCount
+          : modeLimit;
+
+  if (targetCount == 0) {
+    return appliedState;
+  }
+
+  if (!maintenanceController.outputLocked(1)) {
+    appliedState.output1Active = true;
+    appliedState.activeCount++;
+  }
+
+  if (appliedState.activeCount < targetCount &&
+      !maintenanceController.outputLocked(2)) {
+    appliedState.output2Active = true;
+    appliedState.activeCount++;
+  }
+
+  if (appliedState.activeCount < targetCount &&
+      !maintenanceController.outputLocked(3)) {
+    appliedState.output3Active = true;
+    appliedState.activeCount++;
+  }
+
+  return appliedState;
+}
+
+uint8_t currentActiveOutputCount() {
+  return calculateAppliedOutputState().activeCount;
 }
 
 float calculateAutomaticBatteryPowerW() {
@@ -1171,9 +1968,10 @@ const char* currentFaultState() {
     return "critical_lockout";
   }
 
-  // STALE_DATA injects only an old measurement timestamp. The station does
-  // not declare the stale-data fault itself; AWS must detect the age of the
-  // message and convert it to a cloud-side data_or_sensor_fault.
+  if (!trackingSafetyMonitor.movementAllowed()) {
+    return "tracking_fault";
+  }
+
   if (scenarioManager.isStaleDataRequested()) {
     return "normal";
   }
@@ -1357,14 +2155,28 @@ void publishTelemetry() {
   const ScenarioProfile& scenario = scenarioManager.profile();
 
   const char* operatingMode = currentTestOperatingMode();
+  const TrackingSafetyState& trackingSafetyState =
+      trackingSafetyMonitor.state();
+
+  const char* trackingSafetyFault =
+      trackingSafetyFaultToString(trackingSafetyState.fault);
   const bool trackingEnabled =
       modeAllowsTracking(operatingMode) &&
+      maintenanceController.automaticTrackingAllowed() &&
+      trackingSafetyMonitor.movementAllowed() &&
       !isCriticalSafetyActive() &&
       !scenarioManager.isTrackingFaultActive();
-  const uint8_t activeOutputCount = currentActiveOutputCount();
-  const bool output1Active = activeOutputCount >= 1;
-  const bool output2Active = activeOutputCount >= 2;
-  const bool output3Active = activeOutputCount >= 3;
+  const AppliedOutputState appliedOutputs =
+      calculateAppliedOutputState();
+
+  const bool output1Active =
+      appliedOutputs.output1Active;
+
+  const bool output2Active =
+      appliedOutputs.output2Active;
+
+  const bool output3Active =
+      appliedOutputs.output3Active;
   const char* faultState = currentFaultState();
   const char* nominalMode = scenarioManager.nominalOperatingMode();
 
@@ -1414,6 +2226,7 @@ void publishTelemetry() {
         "},"
         "\"tracking\":{"
           "\"enabled\":%s,"
+          "\"safety_fault\":\"%s\","
           "\"angle_deg\":%.2f,"
           "\"target_angle_deg\":%.2f,"
           "\"master_position_raw\":%u,"
@@ -1468,6 +2281,7 @@ void publishTelemetry() {
       output2Active ? 1.58 : 0.0,
       output3Active ? 1.60 : 0.0,
       trackingEnabled ? "true" : "false",
+      trackingSafetyFault,
       scenario.trackingAngleDeg,
       scenario.trackingTargetAngleDeg,
       static_cast<unsigned int>(scenario.masterPositionRaw),
