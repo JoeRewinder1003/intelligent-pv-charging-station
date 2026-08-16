@@ -28,6 +28,11 @@ COMMAND_DISPATCHER_FUNCTION_NAME = os.environ.get(
     "command_dispatcher",
 )
 
+WEATHER_SOURCE = os.environ.get(
+    "WEATHER_SOURCE",
+    "SIMULATED",
+).strip().upper()
+
 MODE_CONFIRMATION_SECONDS = int(
     os.environ.get("MODE_CONFIRMATION_SECONDS", "600")
 )
@@ -49,15 +54,6 @@ OPERATING_MODES = {
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """
-    Evaluates the cloud-side fuzzy decision system and conditionally invokes
-    command_dispatcher.
-
-    When AWS IoT reception metadata is present, the function independently
-    verifies telemetry freshness before the deterministic safety layer. A
-    stale measurement is treated as ``data_or_sensor_fault``. This check does
-    not use simulation flags and therefore validates the actual timestamp.
-    """
 
     try:
         payload = parse_event(event)
@@ -79,13 +75,29 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         )
 
         station_id = evaluation_payload["station_id"]
-        previous_state = load_fis_state(station_id)
+
+        station_weather = None
+
+        if WEATHER_SOURCE == "LIVE":
+            station_status = load_station_status(station_id)
+
+            previous_state = load_fis_state(
+                station_id,
+                station_status=station_status,
+            )
+
+            station_weather = station_status.get("weather")
+
+        else:
+            previous_state = load_fis_state(station_id)
+
         evaluation_time = current_utc_timestamp()
 
         fis_result = evaluate_fis(
             evaluation_payload,
             previous_state=previous_state,
             evaluation_time=evaluation_time,
+            station_weather=station_weather,
         )
         fis_result["temporal_validation"] = temporal_validation
         fis_result["station_reported_fault_state"] = evaluation_payload.get(
@@ -388,8 +400,12 @@ def evaluate_fis(
     payload: Dict[str, Any],
     previous_state: Dict[str, Any] | None = None,
     evaluation_time: str | None = None,
+    station_weather: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    inputs = extract_fis_inputs(payload)
+    inputs = extract_fis_inputs(
+        payload,
+        station_weather=station_weather,
+    )
 
     weather_index = evaluate_weather_fis(
         shortwave_radiation_wm2=inputs["shortwave_radiation_wm2"],
@@ -451,26 +467,96 @@ def evaluate_fis(
     }
 
 
-def extract_fis_inputs(payload: Dict[str, Any]) -> Dict[str, float]:
+def extract_fis_inputs(
+    payload: Dict[str, Any],
+    station_weather: Dict[str, Any] | None = None,
+) -> Dict[str, float]:
     battery = payload.get("battery", {})
     pv = payload.get("pv", {})
-    weather = payload.get("weather", {})
     decision = payload.get("decision", {})
 
-    local_irradiance = float(pv.get("local_irradiance_wm2", 0.0))
+    local_irradiance = float(
+        pv.get("local_irradiance_wm2", 0.0)
+    )
+
+    if WEATHER_SOURCE == "LIVE":
+        if not isinstance(station_weather, dict):
+            raise ValueError(
+                "LIVE weather selected but StationStatus.weather "
+                "is not available"
+            )
+
+        required_fields = (
+            "shortwave_radiation",
+            "cloud_cover",
+            "precipitation_probability",
+        )
+
+        missing_fields = [
+            field
+            for field in required_fields
+            if field not in station_weather
+        ]
+
+        if missing_fields:
+            raise ValueError(
+                "Missing LIVE weather fields: "
+                + ", ".join(missing_fields)
+            )
+
+        shortwave_radiation = float(
+            station_weather["shortwave_radiation"]
+        )
+        cloud_cover = float(
+            station_weather["cloud_cover"]
+        )
+        precipitation_probability = float(
+            station_weather["precipitation_probability"]
+        )
+
+    else:
+        weather = payload.get("weather", {})
+
+        shortwave_radiation = float(
+            weather.get(
+                "shortwave_radiation_wm2",
+                local_irradiance,
+            )
+        )
+
+        cloud_cover = float(
+            weather.get(
+                "cloud_cover_percent",
+                30.0,
+            )
+        )
+
+        precipitation_probability = float(
+            weather.get(
+                "precipitation_probability_percent",
+                0.0,
+            )
+        )
 
     return {
-        "soc_percent": float(battery.get("soc_percent", 0.0)),
-        "p_net_w": float(battery.get("power_w", 0.0)),
+        "soc_percent": float(
+            battery.get("soc_percent", 0.0)
+        ),
+        "p_net_w": float(
+            battery.get("power_w", 0.0)
+        ),
         "local_irradiance_wm2": local_irradiance,
-        "shortwave_radiation_wm2": float(
-            weather.get("shortwave_radiation_wm2", local_irradiance)
+        "shortwave_radiation_wm2": shortwave_radiation,
+        "cloud_cover_percent": cloud_cover,
+        "precipitation_probability_percent": (
+            precipitation_probability
         ),
-        "cloud_cover_percent": float(weather.get("cloud_cover_percent", 30.0)),
-        "precipitation_probability_percent": float(
-            weather.get("precipitation_probability_percent", 0.0)
+        "demand_index": float(
+            decision.get(
+                "demand_index",
+                payload.get("demand_index", 0.5),
+            )
         ),
-        "demand_index": float(decision.get("demand_index", payload.get("demand_index", 0.5))),
     }
 
 
@@ -1127,13 +1213,30 @@ def stabilize_operating_mode(
     }
 
 
-def load_fis_state(station_id: str) -> Dict[str, Any] | None:
+def load_station_status(
+    station_id: str,
+) -> Dict[str, Any]:
     result = status_table.get_item(
         Key={"station_id": station_id},
         ConsistentRead=True,
     )
-    item = result.get("Item", {})
-    state = item.get("fis_state")
+
+    item = result.get("Item")
+
+    if isinstance(item, dict):
+        return item
+
+    return {}
+
+
+def load_fis_state(
+    station_id: str,
+    station_status: Dict[str, Any] | None = None,
+) -> Dict[str, Any] | None:
+    if station_status is None:
+        station_status = load_station_status(station_id)
+
+    state = station_status.get("fis_state")
 
     if isinstance(state, dict):
         return state
