@@ -2,13 +2,15 @@
 
 #include <Arduino.h>
 
-enum class BatteryProtectionState : uint8_t {
+enum class BatteryProtectionState : uint8_t
+{
   NORMAL = 0,
   RESTRICTED = 1,
   CRITICAL = 2,
 };
 
-struct BatteryConfig {
+struct BatteryConfig
+{
   // Confirmed bank configuration.
   uint8_t batteryCount = 3;
   float capacityAhPerBattery = 100.0f;
@@ -17,8 +19,9 @@ struct BatteryConfig {
   // Simulation-only capacity retention used as SOH ground truth.
   // This value is not reported to the cloud as an estimated SOH.
   float emulatedCapacityRetentionPercent = 100.0f;
-
-  // Configurable emulation assumptions supported by literature.
+  // Configurable energy-efficiency assumptions used by the emulator.
+  // These values are simulation parameters and are not measured
+  // efficiencies of the installed Felicity Solar batteries.
   float chargeEfficiency = 0.90f;
   float dischargeEfficiency = 0.95f;
 
@@ -44,7 +47,8 @@ struct BatteryConfig {
   float minimumTerminalVoltageV = 10.5f;
 };
 
-struct BatteryState {
+struct BatteryState
+{
   float socPercent = 0.0f;
   float openCircuitVoltageV = 0.0f;
   float terminalVoltageV = 0.0f;
@@ -67,28 +71,29 @@ struct BatteryState {
       BatteryProtectionState::NORMAL;
 };
 
-class BatteryEmulator {
- public:
-  explicit BatteryEmulator(const BatteryConfig& config = BatteryConfig());
+class BatteryEmulator
+{
+public:
+  explicit BatteryEmulator(const BatteryConfig &config = BatteryConfig());
 
   void begin();
   void update(float requestedBatteryPowerW, float deltaTimeSeconds);
   void setSocPercent(float socPercent);
 
-  const BatteryConfig& config() const;
-  const BatteryState& state() const;
+  const BatteryConfig &config() const;
+  const BatteryState &state() const;
 
   float bankCapacityAh() const;
   float nominalEnergyWh() const;
   float effectiveCapacityAh() const;
   float effectiveEnergyWh() const;
   float equivalentResistanceOhm() const;
-  
-  const char* protectionStateText() const;
+
+  const char *protectionStateText() const;
   bool isCritical() const;
   bool isRestricted() const;
 
- private:
+private:
   BatteryConfig config_;
   BatteryState state_;
 
