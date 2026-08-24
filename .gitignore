@@ -37,3 +37,10 @@ cdk.out/
 Thumbs.db
 
 aws/lambdas/**/*.zip
+
+# Local AWS test payloads and temporary artifacts
+command_key*.json
+station_key.json
+fis_query_names.json
+fis_query_values.json
+fis_processor.zip
