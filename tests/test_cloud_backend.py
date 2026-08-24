@@ -521,6 +521,144 @@ class FISProcessorTests(unittest.TestCase):
             any("fault_state must be one of" in error for error in errors)
         )
 
+    def test_station_mode_mismatch_requires_reconciliation_dispatch(self):
+        payload = json.loads(json.dumps(self.payload))
+        payload.setdefault("decision", {})["operating_mode"] = "M4"
+
+        previous_state = {
+            "applied_mode": "M3",
+            "candidate_mode": "M3",
+            "candidate_since": None,
+            "last_mode_change_at": "2026-08-24T10:30:00Z",
+            "last_evaluation_at": "2026-08-24T10:59:00Z",
+            "last_dispatched_mode": "M3",
+            "last_dispatch_at": "2026-08-24T10:30:00Z",
+        }
+
+        deterministic = {
+            "requested_mode": "M3",
+            "fault_state_level": 0,
+            "outputs_blocked": False,
+        }
+
+        with patch.object(
+            fis,
+            "evaluate_deterministic_layer",
+            return_value=deterministic,
+        ):
+            result = fis.evaluate_fis(
+                payload,
+                previous_state=previous_state,
+                evaluation_time="2026-08-24T11:00:00Z",
+            )
+
+        self.assertEqual(
+            result["final_decision"]["operating_mode"],
+            "M3",
+        )
+        self.assertTrue(
+            result["final_decision"]["command_required"]
+        )
+
+    def test_handler_reconciles_station_mode_mismatch(self):
+        payload = json.loads(json.dumps(self.payload))
+        payload.setdefault("decision", {})["operating_mode"] = "M4"
+
+        previous_state = {
+            "applied_mode": "M3",
+            "candidate_mode": "M3",
+            "candidate_since": None,
+            "last_mode_change_at": "2026-08-24T10:30:00Z",
+            "last_evaluation_at": "2026-08-24T10:59:00Z",
+            "last_dispatched_mode": "M3",
+            "last_dispatch_at": "2026-08-24T10:30:00Z",
+        }
+
+        deterministic = {
+            "requested_mode": "M3",
+            "fault_state_level": 0,
+            "functions_blocked": False,
+            "tracking_blocked": False,
+            "outputs_blocked": False,
+            "tracking_allowed": True,
+            "charging_allowed": True,
+            "outputs_active": 1,
+            "blocked_reason": None,
+            "blocked_reasons": [],
+        }
+
+        with (
+            patch.object(
+                fis,
+                "load_fis_state",
+                return_value=previous_state,
+            ),
+            patch.object(
+                fis,
+                "evaluate_deterministic_layer",
+                return_value=deterministic,
+            ),
+            patch.object(
+                fis,
+                "invoke_command_dispatcher",
+                return_value={
+                    "status_code": 200,
+                    "body": {"status": "sent"},
+                },
+            ) as invoke_dispatcher,
+            patch.object(
+                fis,
+                "save_fis_state",
+            ) as save_state,
+            patch.object(
+                fis,
+                "save_fis_decision",
+            ) as save_decision,
+        ):
+            result = fis.lambda_handler(payload, None)
+
+        self.assertEqual(result["statusCode"], 200)
+
+        body = parse_lambda_body(result)
+
+        self.assertEqual(
+            body["dispatch_result"]["status"],
+            "sent",
+        )
+
+        self.assertTrue(
+            body["fis_result"]["mode_stabilization"][
+                "station_reconciliation_needed"
+            ]
+        )
+
+        self.assertTrue(
+            body["fis_result"]["final_decision"][
+                "command_required"
+            ]
+        )
+
+        invoke_dispatcher.assert_called_once()
+
+        command_request = invoke_dispatcher.call_args.args[0]
+
+        self.assertEqual(
+            command_request["command"],
+            "ENABLE_OUTPUT_1",
+        )
+
+        self.assertEqual(
+            command_request["parameters"]["applied_mode"],
+            "M3",
+        )
+
+        self.assertTrue(
+            command_request["parameters"]["command_required"]
+        )
+
+        save_state.assert_called_once()
+        save_decision.assert_called_once()
+
     def test_first_valid_decision_initializes_applied_mode(self):
         deterministic = {
             "fault_state_level": 0,
@@ -659,8 +797,14 @@ class FISProcessorTests(unittest.TestCase):
             "last_dispatch_at": "2026-08-04T00:00:00Z",
         }
 
+        payload = json.loads(json.dumps(self.payload))
+        payload.setdefault(
+            "decision",
+            {},
+        )["operating_mode"] = "M2"
+
         fis_result = fis.evaluate_fis(
-            self.payload,
+            payload,
             previous_state=previous_state,
             evaluation_time="2026-08-04T00:01:00Z",
         )

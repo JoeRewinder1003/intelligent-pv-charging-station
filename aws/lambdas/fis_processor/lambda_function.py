@@ -21,7 +21,7 @@ STATUS_TABLE_NAME = os.environ.get(
 fis_decision_table = dynamodb.Table(FIS_DECISION_TABLE_NAME)
 status_table = dynamodb.Table(STATUS_TABLE_NAME)
 
-FIS_IMPLEMENTATION_VERSION = "article_v9_dispatch_v2_temporal_validation"
+FIS_IMPLEMENTATION_VERSION = "article_v9_dispatch_v3_reconciliation"
 
 COMMAND_DISPATCHER_FUNCTION_NAME = os.environ.get(
     "COMMAND_DISPATCHER_FUNCTION_NAME",
@@ -430,11 +430,18 @@ def evaluate_fis(
     )
 
     timestamp = evaluation_time or current_utc_timestamp()
+
+    station_reported_mode = payload.get(
+        "decision",
+        {},
+    ).get("operating_mode")
+
     stabilization = stabilize_operating_mode(
         requested_mode=deterministic["requested_mode"],
         deterministic=deterministic,
         previous_state=previous_state,
         evaluation_time=timestamp,
+        station_reported_mode=station_reported_mode,
     )
 
     applied_mode = stabilization["applied_mode"]
@@ -1106,6 +1113,7 @@ def stabilize_operating_mode(
     deterministic: Dict[str, Any],
     previous_state: Dict[str, Any] | None,
     evaluation_time: str,
+    station_reported_mode: str | None = None,
 ) -> Dict[str, Any]:
     """
     Cloud adaptation of the article v9 anti-chattering layer.
@@ -1191,7 +1199,22 @@ def stabilize_operating_mode(
         last_mode_change_at,
     )
 
-    command_required = applied_mode != last_dispatched_mode
+    if station_reported_mode not in OPERATING_MODES.values():
+        station_reported_mode = None
+
+    cloud_dispatch_needed = (
+        applied_mode != last_dispatched_mode
+    )
+
+    station_reconciliation_needed = (
+        station_reported_mode is not None
+        and station_reported_mode != applied_mode
+    )
+
+    command_required = (
+        cloud_dispatch_needed
+        or station_reconciliation_needed
+    )
 
     return {
         "requested_mode": requested_mode,
@@ -1206,6 +1229,9 @@ def stabilize_operating_mode(
         "dwell_elapsed_seconds": int(dwell_elapsed),
         "confirmation_required_seconds": MODE_CONFIRMATION_SECONDS,
         "minimum_dwell_seconds": MIN_MODE_DWELL_SECONDS,
+        "station_reported_mode": station_reported_mode,
+        "cloud_dispatch_needed": cloud_dispatch_needed,
+        "station_reconciliation_needed": station_reconciliation_needed,
         "safety_reduction": safety_reduction,
         "mode_changed": mode_changed,
         "command_required": command_required,
