@@ -44,3 +44,7 @@ station_key.json
 fis_query_names.json
 fis_query_values.json
 fis_processor.zip
+
+# Local test files
+test_*.py
+tests/
