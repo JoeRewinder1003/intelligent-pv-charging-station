@@ -37,11 +37,14 @@ struct BatteryConfig
   float maxNormalDischargeCurrentA = 30.0f;
   float overcurrentDischargeA = 35.0f;
 
-  // Supervisory SOC thresholds with hysteresis.
-  float restrictedSocPercent = 50.0f;
-  float criticalSocPercent = 20.0f;
-  float normalRecoverySocPercent = 55.0f;
-  float criticalRecoverySocPercent = 25.0f;
+  // Local SOC protection aligned with the cloud deterministic policy.
+  // Enter RESTRICTED at <=25% SOC and CRITICAL at <=15% SOC.
+  // A 5-percentage-point recovery hysteresis prevents rapid state toggling
+  // near the thresholds while preserving local safety precedence.
+  float restrictedSocPercent = 25.0f;
+  float criticalSocPercent = 15.0f;
+  float normalRecoverySocPercent = 30.0f;
+  float criticalRecoverySocPercent = 20.0f;
 
   // Manufacturer final-discharge voltage for I <= 0.2C.
   float minimumTerminalVoltageV = 10.5f;

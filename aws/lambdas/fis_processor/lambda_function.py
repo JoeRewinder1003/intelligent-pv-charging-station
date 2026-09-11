@@ -255,6 +255,21 @@ def validate_input(payload: Dict[str, Any]) -> List[str]:
     validate_numeric(battery, "power_w", errors, None, None)
     validate_numeric(pv, "local_irradiance_wm2", errors, 0, None)
 
+    battery_protection_state = battery.get("protection_state")
+    if battery_protection_state is not None:
+        allowed_battery_protection_states = {
+            "NORMAL",
+            "RESTRICTED",
+            "CRITICAL",
+        }
+        if not isinstance(battery_protection_state, str):
+            errors.append("battery.protection_state must be a string")
+        elif battery_protection_state.upper() not in allowed_battery_protection_states:
+            errors.append(
+                "battery.protection_state must be one of: "
+                + ", ".join(sorted(allowed_battery_protection_states))
+            )
+
     decision = payload.get("decision", {})
     if isinstance(decision, dict) and "demand_index" in decision:
         validate_numeric(decision, "demand_index", errors, 0, 1)
@@ -427,6 +442,9 @@ def evaluate_fis(
         fault_state=payload.get("fault_state", "normal"),
         local_irradiance_wm2=inputs["local_irradiance_wm2"],
         weather_index=weather_index,
+        battery_protection_state=str(
+            payload.get("battery", {}).get("protection_state", "NORMAL")
+        ).upper(),
     )
 
     timestamp = evaluation_time or current_utc_timestamp()
@@ -894,6 +912,7 @@ def evaluate_deterministic_layer(
     fault_state: str,
     local_irradiance_wm2: float,
     weather_index: float,
+    battery_protection_state: str = "NORMAL",
 ) -> Dict[str, Any]:
     """
     Apply the deterministic restrictions represented in the ESP32 article v9.
@@ -910,8 +929,27 @@ def evaluate_deterministic_layer(
     outputs_blocked = False
     blocked_reasons: List[str] = []
 
-    critical_energy_fault = soc_percent <= 15.0
-    low_battery_restriction = 15.0 < soc_percent <= 25.0
+    normalized_battery_protection_state = str(
+        battery_protection_state or "NORMAL"
+    ).upper()
+
+    critical_soc = soc_percent <= 15.0
+    low_soc = 15.0 < soc_percent <= 25.0
+    local_battery_critical = (
+        normalized_battery_protection_state == "CRITICAL"
+    )
+    local_battery_restricted = (
+        normalized_battery_protection_state == "RESTRICTED"
+    )
+
+    # The station-reported battery state is also honored so the cloud follows
+    # the same recovery hysteresis as the ESP32. Local safety remains the
+    # authoritative layer if the two sides temporarily disagree.
+    critical_energy_fault = critical_soc or local_battery_critical
+    low_battery_restriction = (
+        not critical_energy_fault
+        and (low_soc or local_battery_restricted)
+    )
 
     if fault_state == "critical_lockout" or critical_energy_fault:
         requested_mode = "M0"
@@ -919,11 +957,12 @@ def evaluate_deterministic_layer(
         functions_blocked = True
         tracking_blocked = True
         outputs_blocked = True
-        blocked_reasons.append(
-            "critical_lockout"
-            if fault_state == "critical_lockout"
-            else "critical_soc"
-        )
+        if fault_state == "critical_lockout":
+            blocked_reasons.append("critical_lockout")
+        elif critical_soc:
+            blocked_reasons.append("critical_soc")
+        else:
+            blocked_reasons.append("local_battery_critical")
     else:
         if fault_state == "data_or_sensor_fault":
             if mode_number(requested_mode) > 1:
@@ -941,7 +980,11 @@ def evaluate_deterministic_layer(
             functions_blocked = True
             tracking_blocked = True
             outputs_blocked = True
-            blocked_reasons.append("low_battery_restriction")
+            blocked_reasons.append(
+                "low_battery_restriction"
+                if low_soc
+                else "local_battery_restriction"
+            )
 
         if fault_state == "non_critical_restriction":
             fault_state_level = max(fault_state_level, 1)

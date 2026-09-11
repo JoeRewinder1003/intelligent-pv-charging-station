@@ -75,7 +75,7 @@ static constexpr unsigned long ACTUATOR_DIAGNOSTICS_RETRY_INTERVAL_MS = 2000;
 static constexpr time_t MIN_VALID_EPOCH = 1767225600;  // 2026-01-01 UTC
 static constexpr time_t STALE_DATA_OFFSET_SECONDS = 60;
 
-static constexpr char RESTRICTED_TEST_MODE[] = "M2";
+static constexpr char RESTRICTED_TEST_MODE[] = "M1";
 static constexpr char LOCKOUT_TEST_MODE[] = "M0";
 
 // Simplified functional-simulation constants.
@@ -2585,13 +2585,21 @@ bool copyText(
 }
 
 const char* currentTestOperatingMode() {
+
   if (isCriticalSafetyActive()) {
-    return LOCKOUT_TEST_MODE;
+    return LOCKOUT_TEST_MODE;  // M0
   }
 
+
   if (batteryEmulator.isRestricted()) {
-    return RESTRICTED_TEST_MODE;
+    if (cloudOperatingModeActive &&
+        strcmp(cloudOperatingMode, "M0") == 0) {
+      return cloudOperatingMode;
+    }
+
+    return RESTRICTED_TEST_MODE;  // M1
   }
+
 
   if (cloudOperatingModeActive) {
     return cloudOperatingMode;
