@@ -1,0 +1,5 @@
+timestamp_utc,elapsed_s,event
+2026-08-24T23:26:29Z,0.0,"ESP32 telemetry - M4, 2 outputs"
+2026-08-24T23:26:33.857919Z,4.857919,Cloud reconciliation - LOCKOUT
+2026-08-24T23:26:34Z,5.0,"ESP32 ACK - accepted, applied=true"
+2026-08-24T23:26:44Z,15.0,"ESP32 telemetry - M0, 0 outputs"
