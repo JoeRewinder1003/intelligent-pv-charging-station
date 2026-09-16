@@ -905,7 +905,10 @@ def evaluate_main_fis(
     # power balance improves.
     output_activation[1] = max(
         output_activation[1],
-        min(soc_low, power_available),
+        min(
+            soc_low,
+            power_available,
+        ),
     )
 
     # Strong discharge restricts service at medium/high SOC.
@@ -917,39 +920,68 @@ def evaluate_main_fis(
         ),
     )
 
+    # Low irradiance and low demand keep the station in
+    # restricted/basic operation for medium-to-high SOC.
+    output_activation[1] = max(
+        output_activation[1],
+        min(
+            max(soc_medium, soc_high),
+            irr_low,
+            d_low,
+        ),
+    )
+
     # ---------------------------------------------------------
     # M2 - Normal station operation without charging outputs
     # ---------------------------------------------------------
 
-    # Medium SOC provides normal station availability while
-    # preserving battery energy.
+    # Medium SOC supports normal station operation when solar
+    # availability or charging demand is present.
     output_activation[2] = max(
         output_activation[2],
-        min(soc_medium, power_available),
+        min(
+            soc_medium,
+            power_available,
+            max(solar_available, demand_active),
+        ),
     )
 
-    # At high SOC, negative power and low demand do not require
-    # an active charging output.
+    # High SOC with negative power and low demand may remain
+    # in M2 when useful solar availability exists.
     output_activation[2] = max(
         output_activation[2],
-        min(soc_high, p_negative, d_low),
+        min(
+            soc_high,
+            p_negative,
+            d_low,
+            solar_available,
+        ),
     )
 
+    # High SOC with slightly negative power and low demand may
+    # also remain in M2 when useful solar availability exists.
     output_activation[2] = max(
         output_activation[2],
-        min(soc_high, p_slight_negative, d_low),
+        min(
+            soc_high,
+            p_slight_negative,
+            d_low,
+            solar_available,
+        ),
     )
 
     # ---------------------------------------------------------
     # M3 - One charging output
     # ---------------------------------------------------------
 
-    # High SOC with low demand requires at most one output.
+# High SOC with low demand may enable one charging output
+# only when positive power and useful solar conditions are available.
     output_activation[3] = max(
         output_activation[3],
         min(
             soc_high,
-            max(p_balanced, p_positive),
+            p_positive,
+            solar_available,
             d_low,
         ),
     )

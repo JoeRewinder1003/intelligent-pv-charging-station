@@ -125,7 +125,7 @@ def main_activations(soc, pnet, irradiance, weather, demand):
         min(soc_low, p_strong_negative),
     )
 
-    # M1
+        # M1
     out[1] = max(
         out[1],
         min(soc_low, power_available),
@@ -139,22 +139,47 @@ def main_activations(soc, pnet, irradiance, weather, demand):
         ),
     )
 
+    # Low irradiance and low demand keep the station in
+    # restricted/basic operation for medium-to-high SOC.
+    out[1] = max(
+        out[1],
+        min(
+            max(soc_medium, soc_high),
+            irr_low,
+            d_low,
+        ),
+    )
+
     # M2
     out[2] = max(
         out[2],
-        min(soc_medium, power_available),
+        min(
+            soc_medium,
+            power_available,
+            max(solar_available, demand_active),
+        ),
     )
 
     out[2] = max(
         out[2],
-        min(soc_high, p_negative, d_low),
+        min(
+            soc_high,
+            p_negative,
+            d_low,
+            solar_available,
+        ),
     )
 
     out[2] = max(
         out[2],
-        min(soc_high, p_slight_negative, d_low),
+        min(
+            soc_high,
+            p_slight_negative,
+            d_low,
+            solar_available,
+        ),
     )
-
+    
     # M3
     out[3] = max(
         out[3],
