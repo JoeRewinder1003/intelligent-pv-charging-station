@@ -590,58 +590,156 @@ def evaluate_weather_fis(
     cloud_cover_percent: float,
     precipitation_probability_percent: float,
 ) -> float:
-    """Evaluate the Weather FIS using the final ESP32 article v9 definition."""
+    """Evaluate the revised Weather FIS."""
 
-    rad_low = trapmf(shortwave_radiation_wm2, -50.0, 0.0, 150.0, 350.0)
-    rad_med = trimf(shortwave_radiation_wm2, 200.0, 500.0, 800.0)
-    rad_high = trapmf(shortwave_radiation_wm2, 650.0, 850.0, 1000.0, 1100.0)
+    # ---------------------------------------------------------
+    # Input membership functions
+    # ---------------------------------------------------------
 
-    cloud_low = trapmf(cloud_cover_percent, -5.0, 0.0, 20.0, 40.0)
-    cloud_med = trimf(cloud_cover_percent, 25.0, 50.0, 75.0)
-    cloud_high = trapmf(cloud_cover_percent, 60.0, 80.0, 100.0, 105.0)
+    # Shortwave radiation [W/m²]
+    rad_low = trapmf(
+        shortwave_radiation_wm2,
+        -50.0, 0.0, 150.0, 350.0
+    )
+    rad_med = trimf(
+        shortwave_radiation_wm2,
+        200.0, 500.0, 800.0
+    )
+    rad_high = trapmf(
+        shortwave_radiation_wm2,
+        650.0, 850.0, 1000.0, 1250.0
+    )
 
+    # Cloud cover [%]
+    cloud_low = trapmf(
+        cloud_cover_percent,
+        -5.0, 0.0, 20.0, 40.0
+    )
+    cloud_med = trimf(
+        cloud_cover_percent,
+        25.0, 50.0, 75.0
+    )
+    cloud_high = trapmf(
+        cloud_cover_percent,
+        60.0, 80.0, 100.0, 105.0
+    )
+
+    # Precipitation probability [%]
     precip_low = trapmf(
         precipitation_probability_percent,
-        -5.0,
-        0.0,
-        15.0,
-        35.0,
+        -5.0, 0.0, 15.0, 35.0
     )
     precip_med = trimf(
         precipitation_probability_percent,
-        20.0,
-        50.0,
-        80.0,
+        20.0, 50.0, 80.0
     )
     precip_high = trapmf(
         precipitation_probability_percent,
-        65.0,
-        85.0,
-        100.0,
-        105.0,
+        65.0, 85.0, 100.0, 105.0
     )
+
+    # ---------------------------------------------------------
+    # Output activation levels
+    # ---------------------------------------------------------
 
     out_poor = 0.0
     out_moderate = 0.0
     out_favorable = 0.0
 
-    # Favorable weather rules.
-    out_favorable = max(out_favorable, min(rad_high, cloud_low, precip_low))
-    out_favorable = max(out_favorable, min(rad_high, cloud_med, precip_low))
-    out_favorable = max(out_favorable, min(rad_med, cloud_low, precip_low))
+    # ---------------------------------------------------------
+    # Favorable weather rules
+    # ---------------------------------------------------------
 
-    # Moderate weather rules.
-    out_moderate = max(out_moderate, min(rad_med, cloud_med, precip_low))
-    out_moderate = max(out_moderate, min(rad_med, cloud_low, precip_med))
-    out_moderate = max(out_moderate, min(rad_high, cloud_high, precip_low))
-    out_moderate = max(out_moderate, min(rad_high, cloud_med, precip_med))
-    out_moderate = max(out_moderate, min(rad_low, cloud_low, precip_low))
+    # High radiation + low clouds + low precipitation
+    out_favorable = max(
+        out_favorable,
+        min(rad_high, cloud_low, precip_low),
+    )
 
-    # Poor weather rules.
-    out_poor = max(out_poor, rad_low)
-    out_poor = max(out_poor, cloud_high)
-    out_poor = max(out_poor, precip_high)
-    out_poor = max(out_poor, min(cloud_med, precip_med))
+    # High radiation + medium clouds + low precipitation
+    out_favorable = max(
+        out_favorable,
+        min(rad_high, cloud_med, precip_low),
+    )
+
+    # Medium radiation + low clouds + low precipitation
+    out_favorable = max(
+        out_favorable,
+        min(rad_med, cloud_low, precip_low),
+    )
+
+    # ---------------------------------------------------------
+    # Moderate weather rules
+    # ---------------------------------------------------------
+
+    # Medium radiation + medium clouds + low precipitation
+    out_moderate = max(
+        out_moderate,
+        min(rad_med, cloud_med, precip_low),
+    )
+
+    # Medium radiation + low clouds + medium precipitation
+    out_moderate = max(
+        out_moderate,
+        min(rad_med, cloud_low, precip_med),
+    )
+
+    # High radiation + high clouds + low precipitation
+    out_moderate = max(
+        out_moderate,
+        min(rad_high, cloud_high, precip_low),
+    )
+
+    # High radiation + medium clouds + medium precipitation
+    out_moderate = max(
+        out_moderate,
+        min(rad_high, cloud_med, precip_med),
+    )
+
+    # Low radiation + low clouds + low precipitation
+    out_moderate = max(
+        out_moderate,
+        min(rad_low, cloud_low, precip_low),
+    )
+
+ 
+
+    out_moderate = max(
+        out_moderate,
+        min(rad_high, cloud_low, precip_med),
+    )
+
+    # ---------------------------------------------------------
+    # Poor weather rules
+    # ---------------------------------------------------------
+
+    # Low radiation
+    out_poor = max(
+        out_poor,
+        rad_low,
+    )
+
+    # High cloud cover
+    out_poor = max(
+        out_poor,
+        cloud_high,
+    )
+
+    # High precipitation probability
+    out_poor = max(
+        out_poor,
+        precip_high,
+    )
+
+    # Medium clouds + medium precipitation
+    out_poor = max(
+        out_poor,
+        min(cloud_med, precip_med),
+    )
+
+    # ---------------------------------------------------------
+    # Mamdani aggregation and centroid defuzzification
+    # ---------------------------------------------------------
 
     numerator = 0.0
     denominator = 0.0
@@ -649,17 +747,49 @@ def evaluate_weather_fis(
     for i in range(101):
         x = i / 100.0
 
-        poor_mf = trapmf(x, -0.10, 0.00, 0.20, 0.45)
-        moderate_mf = trimf(x, 0.25, 0.50, 0.75)
-        favorable_mf = trapmf(x, 0.55, 0.80, 1.00, 1.10)
+        # Weather Index output membership functions
+        poor_mf = trapmf(
+            x,
+            -0.10, 0.00, 0.20, 0.45
+        )
+        moderate_mf = trimf(
+            x,
+            0.25, 0.50, 0.75
+        )
+        favorable_mf = trapmf(
+            x,
+            0.55, 0.80, 1.00, 1.10
+        )
 
-        mu_poor = min(out_poor, poor_mf)
-        mu_moderate = min(out_moderate, moderate_mf)
-        mu_favorable = min(out_favorable, favorable_mf)
-        mu_aggregated = max(mu_poor, mu_moderate, mu_favorable)
+        # Implication
+        mu_poor = min(
+            out_poor,
+            poor_mf,
+        )
+
+        mu_moderate = min(
+            out_moderate,
+            moderate_mf,
+        )
+
+        mu_favorable = min(
+            out_favorable,
+            favorable_mf,
+        )
+
+        # Aggregation
+        mu_aggregated = max(
+            mu_poor,
+            mu_moderate,
+            mu_favorable,
+        )
 
         numerator += x * mu_aggregated
         denominator += mu_aggregated
+
+    # ---------------------------------------------------------
+    # Zero-activation fallback
+    # ---------------------------------------------------------
 
     if denominator <= 0.0001:
         return 0.0
