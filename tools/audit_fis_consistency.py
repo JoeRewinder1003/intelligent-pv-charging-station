@@ -76,7 +76,7 @@ def main_activations(soc, pnet, irradiance, weather, demand):
 
     irr_low = trapmf(irradiance, -50.0, 0.0, 150.0, 350.0)
     irr_med = trimf(irradiance, 250.0, 500.0, 750.0)
-    irr_high = trapmf(irradiance, 650.0, 850.0, 1000.0, 1100.0)
+    irr_high = trapmf(irradiance, 650.0, 850.0, 1000.0, 1250.0)
 
     w_poor = trapmf(weather, -0.10, 0.00, 0.20, 0.45)
     w_moderate = trimf(weather, 0.25, 0.50, 0.75)
@@ -86,115 +86,169 @@ def main_activations(soc, pnet, irradiance, weather, demand):
     d_medium = trimf(demand, 0.25, 0.50, 0.75)
     d_high = trapmf(demand, 0.55, 0.80, 1.00, 1.10)
 
-    energy_ok = max(p_balanced, p_positive)
-    solar_ok = max(irr_med, irr_high)
-    weather_ok = max(w_moderate, w_favorable)
-    demand_active = max(d_medium, d_high)
+    soc_high_not_full = min(
+        soc_high,
+        1.0 - soc_full,
+    )
 
-    battery_service_available = min(soc_high, demand_active)
+    power_available = max(
+        p_negative,
+        p_balanced,
+        p_positive,
+    )
 
-    high_energy_service = min(
-        soc_full,
-        min(d_high, max(p_positive, min(p_balanced, solar_ok))),
+    demand_active = max(
+        d_medium,
+        d_high,
+    )
+
+    solar_available = max(
+        irr_med,
+        irr_high,
+    )
+
+    weather_available = max(
+        w_moderate,
+        w_favorable,
     )
 
     out = [0.0] * 6
 
-    out[0] = max(out[0], soc_critical)
-    out[0] = max(out[0], min(soc_low, p_negative))
-
-    out[1] = max(out[1], min(soc_low, p_balanced))
-    out[1] = max(out[1], min(soc_low, irr_low))
-    out[1] = max(out[1], min(soc_high, min(irr_low, w_poor)))
-
-    out[2] = max(out[2], min(soc_medium, p_balanced))
-    out[2] = max(out[2], min(soc_medium, min(irr_med, w_moderate)))
-    out[2] = max(
-        out[2],
-        min(soc_high, min(energy_ok, min(solar_ok, w_poor))),
+    # M0
+    out[0] = max(
+        out[0],
+        soc_critical,
     )
 
-    out[3] = max(
-        out[3],
-        min(soc_medium, min(p_positive, min(irr_med, w_moderate))),
-    )
-    out[3] = max(
-        out[3],
-        min(soc_high, min(p_balanced, min(solar_ok, weather_ok))),
-    )
-    out[3] = max(
-        out[3],
-        min(soc_high, min(p_positive, min(solar_ok, d_low))),
-    )
-    out[3] = max(
-        out[3],
-        min(soc_high, min(p_positive, min(solar_ok, demand_active))),
-    )
-    out[3] = max(
-        out[3],
-        min(soc_full, min(p_positive, demand_active)),
-    )
-    out[3] = max(out[3], min(battery_service_available, p_balanced))
-    out[3] = max(out[3], min(battery_service_available, p_slight_negative))
-    out[3] = max(
-        out[3],
-        min(battery_service_available, min(w_poor, irr_low)),
+    out[0] = max(
+        out[0],
+        min(soc_low, p_strong_negative),
     )
 
-    out[4] = max(
-        out[4],
-        min(soc_full, min(d_high, max(p_balanced, p_slight_negative))),
-    )
-    out[4] = max(
-        out[4],
-        min(soc_high, min(p_positive, min(irr_high, min(w_favorable, d_medium)))),
-    )
-    out[4] = max(
-        out[4],
-        min(soc_high, min(p_positive, min(irr_high, min(w_moderate, d_high)))),
-    )
-    out[4] = max(
-        out[4],
-        min(soc_medium, min(p_positive, min(irr_high, min(w_favorable, d_high)))),
-    )
-    out[4] = max(
-        out[4],
-        min(soc_full, min(p_positive, min(solar_ok, min(weather_ok, d_high)))),
-    )
-    out[4] = max(
-        out[4],
-        min(soc_full, min(p_positive, demand_active)),
-    )
-
-    out[5] = max(
-        out[5],
-        min(soc_full, min(p_positive, min(irr_high, d_high))),
-    )
-    out[5] = max(
-        out[5],
-        min(soc_full, min(p_positive, min(solar_ok, d_high))),
-    )
-    out[5] = max(
-        out[5],
-        min(soc_full, min(energy_ok, min(irr_high, d_high))),
-    )
-    out[5] = max(out[5], min(high_energy_service, weather_ok))
-    out[5] = max(
-        out[5],
-        min(soc_high, min(p_positive, min(irr_high, min(w_favorable, d_high)))),
+    # M1
+    out[1] = max(
+        out[1],
+        min(soc_low, power_available),
     )
 
     out[1] = max(
         out[1],
-        min(p_strong_negative, max(d_medium, d_high)),
+        min(
+            max(soc_medium, soc_high),
+            p_strong_negative,
+        ),
     )
-    out[1] = max(
-        out[1],
-        min(soc_low, min(p_negative, max(d_medium, d_high))),
-    )
+
+    # M2
     out[2] = max(
         out[2],
-        min(w_poor, min(soc_medium, energy_ok)),
+        min(soc_medium, power_available),
+    )
+
+    out[2] = max(
+        out[2],
+        min(soc_high, p_negative, d_low),
+    )
+
+    out[2] = max(
+        out[2],
+        min(soc_high, p_slight_negative, d_low),
+    )
+
+    # M3
+    out[3] = max(
+        out[3],
+        min(
+            soc_high,
+            max(p_balanced, p_positive),
+            d_low,
+        ),
+    )
+
+    out[3] = max(
+        out[3],
+        min(
+            soc_high,
+            max(p_negative, p_slight_negative),
+            demand_active,
+        ),
+    )
+
+    out[3] = max(
+        out[3],
+        min(
+            soc_high,
+            p_positive,
+            irr_low,
+            demand_active,
+        ),
+    )
+
+    out[3] = max(
+        out[3],
+        min(
+            soc_high,
+            p_positive,
+            w_poor,
+            demand_active,
+        ),
+    )
+
+    # M4
+    out[4] = max(
+        out[4],
+        min(
+            soc_high,
+            p_positive,
+            solar_available,
+            weather_available,
+            d_medium,
+        ),
+    )
+
+    out[4] = max(
+        out[4],
+        min(
+            soc_high,
+            p_positive,
+            irr_med,
+            weather_available,
+            d_high,
+        ),
+    )
+
+    out[4] = max(
+        out[4],
+        min(
+            soc_high,
+            p_positive,
+            irr_high,
+            w_moderate,
+            d_high,
+        ),
+    )
+
+    out[4] = max(
+        out[4],
+        min(
+            soc_high_not_full,
+            p_positive,
+            irr_high,
+            w_favorable,
+            d_high,
+        ),
+    )
+
+    # M5
+    out[5] = max(
+        out[5],
+        min(
+            soc_full,
+            p_positive,
+            irr_high,
+            w_favorable,
+            d_high,
+        ),
     )
 
     return out
@@ -250,7 +304,7 @@ def audit_weather():
 def audit_main():
     soc_values = range(0, 101, 5)
     pnet_values = range(-300, 301, 50)
-    irradiance_values = range(0, 1001, 100)
+    irradiance_values = range(0, 1201, 100)
     weather_values = [0.1, 0.3, 0.5, 0.7, 0.9]
     demand_values = [0.1, 0.3, 0.5, 0.7, 0.9]
 

@@ -803,188 +803,264 @@ def evaluate_main_fis(
     weather_index: float,
     demand_index: float,
 ) -> Dict[str, Any]:
-    """Evaluate the Main FIS using the final ESP32 article v9 definition."""
+    """Evaluate the revised Main FIS."""
 
+    # ---------------------------------------------------------
+    # Input membership functions
+    # ---------------------------------------------------------
+
+    # Battery SOC [%]
     soc_critical = trapmf(soc_percent, -5.0, 0.0, 15.0, 25.0)
     soc_low = trimf(soc_percent, 15.0, 30.0, 45.0)
     soc_medium = trimf(soc_percent, 35.0, 55.0, 75.0)
     soc_high = trapmf(soc_percent, 65.0, 80.0, 100.0, 105.0)
     soc_full = trapmf(soc_percent, 85.0, 92.0, 100.0, 105.0)
 
+    # Net battery power [W]
     p_negative = trapmf(p_net_w, -400.0, -300.0, -60.0, 0.0)
     p_slight_negative = trapmf(p_net_w, -180.0, -120.0, -20.0, 20.0)
     p_strong_negative = trapmf(p_net_w, -450.0, -350.0, -220.0, -120.0)
     p_balanced = trimf(p_net_w, -80.0, 0.0, 80.0)
     p_positive = trapmf(p_net_w, 0.0, 60.0, 300.0, 400.0)
 
-    irr_low = trapmf(local_irradiance_wm2, -50.0, 0.0, 150.0, 350.0)
-    irr_med = trimf(local_irradiance_wm2, 250.0, 500.0, 750.0)
-    irr_high = trapmf(local_irradiance_wm2, 650.0, 850.0, 1000.0, 1100.0)
+    # Local irradiance [W/m²]
+    irr_low = trapmf(
+        local_irradiance_wm2,
+        -50.0, 0.0, 150.0, 350.0,
+    )
+    irr_med = trimf(
+        local_irradiance_wm2,
+        250.0, 500.0, 750.0,
+    )
+    irr_high = trapmf(
+        local_irradiance_wm2,
+        650.0, 850.0, 1000.0, 1250.0,
+    )
 
+    # Weather Index
     w_poor = trapmf(weather_index, -0.10, 0.00, 0.20, 0.45)
     w_moderate = trimf(weather_index, 0.25, 0.50, 0.75)
     w_favorable = trapmf(weather_index, 0.55, 0.80, 1.00, 1.10)
 
+    # Demand Index
     d_low = trapmf(demand_index, -0.10, 0.00, 0.20, 0.45)
     d_medium = trimf(demand_index, 0.25, 0.50, 0.75)
     d_high = trapmf(demand_index, 0.55, 0.80, 1.00, 1.10)
 
-    energy_ok = max(p_balanced, p_positive)
-    solar_ok = max(irr_med, irr_high)
-    weather_ok = max(w_moderate, w_favorable)
-    demand_active = max(d_medium, d_high)
+    # ---------------------------------------------------------
+    # Composite fuzzy terms
+    # ---------------------------------------------------------
 
-    battery_service_available = min(soc_high, demand_active)
-    high_energy_service = min(
-        soc_full,
-        min(d_high, max(p_positive, min(p_balanced, solar_ok))),
+    # This term separates the high-SOC region from the Full-SOC
+    # region without changing the original SOC membership functions.
+    soc_high_not_full = min(
+        soc_high,
+        1.0 - soc_full,
+    )
+
+    power_available = max(
+        p_negative,
+        p_balanced,
+        p_positive,
+    )
+
+    demand_active = max(
+        d_medium,
+        d_high,
+    )
+
+    solar_available = max(
+        irr_med,
+        irr_high,
+    )
+
+    weather_available = max(
+        w_moderate,
+        w_favorable,
     )
 
     output_activation = [0.0] * 6
 
-    # Dominant safety and low-energy rules.
-    output_activation[0] = max(output_activation[0], soc_critical)
+    # ---------------------------------------------------------
+    # M0 - Protected operation
+    # ---------------------------------------------------------
+
+    # Critical battery SOC.
     output_activation[0] = max(
         output_activation[0],
-        min(soc_low, p_negative),
-    )
-    output_activation[1] = max(
-        output_activation[1],
-        min(soc_low, p_balanced),
-    )
-    output_activation[1] = max(
-        output_activation[1],
-        min(soc_low, irr_low),
-    )
-    output_activation[1] = max(
-        output_activation[1],
-        min(soc_high, min(irr_low, w_poor)),
+        soc_critical,
     )
 
-    # Basic operational availability.
-    output_activation[2] = max(
-        output_activation[2],
-        min(soc_medium, p_balanced),
-    )
-    output_activation[2] = max(
-        output_activation[2],
-        min(soc_medium, min(irr_med, w_moderate)),
-    )
-    output_activation[2] = max(
-        output_activation[2],
-        min(soc_high, min(energy_ok, min(solar_ok, w_poor))),
+    # Low SOC combined with strong battery discharge.
+    output_activation[0] = max(
+        output_activation[0],
+        min(soc_low, p_strong_negative),
     )
 
-    # One-output rules.
-    output_activation[3] = max(
-        output_activation[3],
-        min(soc_medium, min(p_positive, min(irr_med, w_moderate))),
-    )
-    output_activation[3] = max(
-        output_activation[3],
-        min(soc_high, min(p_balanced, min(solar_ok, weather_ok))),
-    )
-    output_activation[3] = max(
-        output_activation[3],
-        min(soc_high, min(p_positive, min(solar_ok, d_low))),
-    )
-    output_activation[3] = max(
-        output_activation[3],
-        min(soc_high, min(p_positive, min(solar_ok, demand_active))),
-    )
-    output_activation[3] = max(
-        output_activation[3],
-        min(soc_full, min(p_positive, demand_active)),
-    )
-    output_activation[3] = max(
-        output_activation[3],
-        min(battery_service_available, p_balanced),
-    )
-    output_activation[3] = max(
-        output_activation[3],
-        min(battery_service_available, p_slight_negative),
-    )
-    output_activation[3] = max(
-        output_activation[3],
-        min(battery_service_available, min(w_poor, irr_low)),
+    # ---------------------------------------------------------
+    # M1 - Restricted/basic operation
+    # ---------------------------------------------------------
+
+    # Low SOC remains restricted even if the instantaneous
+    # power balance improves.
+    output_activation[1] = max(
+        output_activation[1],
+        min(soc_low, power_available),
     )
 
-    # Two-output rules.
-    output_activation[4] = max(
-        output_activation[4],
-        min(soc_full, min(d_high, max(p_balanced, p_slight_negative))),
+    # Strong discharge restricts service at medium/high SOC.
+    output_activation[1] = max(
+        output_activation[1],
+        min(
+            max(soc_medium, soc_high),
+            p_strong_negative,
+        ),
     )
+
+    # ---------------------------------------------------------
+    # M2 - Normal station operation without charging outputs
+    # ---------------------------------------------------------
+
+    # Medium SOC provides normal station availability while
+    # preserving battery energy.
+    output_activation[2] = max(
+        output_activation[2],
+        min(soc_medium, power_available),
+    )
+
+    # At high SOC, negative power and low demand do not require
+    # an active charging output.
+    output_activation[2] = max(
+        output_activation[2],
+        min(soc_high, p_negative, d_low),
+    )
+
+    output_activation[2] = max(
+        output_activation[2],
+        min(soc_high, p_slight_negative, d_low),
+    )
+
+    # ---------------------------------------------------------
+    # M3 - One charging output
+    # ---------------------------------------------------------
+
+    # High SOC with low demand requires at most one output.
+    output_activation[3] = max(
+        output_activation[3],
+        min(
+            soc_high,
+            max(p_balanced, p_positive),
+            d_low,
+        ),
+    )
+
+    # Battery-supported service under negative/slightly negative
+    # power when demand is present.
+    output_activation[3] = max(
+        output_activation[3],
+        min(
+            soc_high,
+            max(p_negative, p_slight_negative),
+            demand_active,
+        ),
+    )
+
+    # Positive power but low irradiance limits service to one output.
+    output_activation[3] = max(
+        output_activation[3],
+        min(
+            soc_high,
+            p_positive,
+            irr_low,
+            demand_active,
+        ),
+    )
+
+    # Positive power but poor weather also limits service.
+    output_activation[3] = max(
+        output_activation[3],
+        min(
+            soc_high,
+            p_positive,
+            w_poor,
+            demand_active,
+        ),
+    )
+
+    # ---------------------------------------------------------
+    # M4 - Two charging outputs
+    # ---------------------------------------------------------
+
+    # Medium demand with positive power and useful solar/weather
+    # conditions.
     output_activation[4] = max(
         output_activation[4],
         min(
             soc_high,
-            min(p_positive, min(irr_high, min(w_favorable, d_medium))),
+            p_positive,
+            solar_available,
+            weather_available,
+            d_medium,
         ),
     )
+
+    # High demand with medium irradiance.
     output_activation[4] = max(
         output_activation[4],
         min(
             soc_high,
-            min(p_positive, min(irr_high, min(w_moderate, d_high))),
+            p_positive,
+            irr_med,
+            weather_available,
+            d_high,
         ),
     )
+
+    # High irradiance and high demand, but only moderate weather.
     output_activation[4] = max(
         output_activation[4],
         min(
-            soc_medium,
-            min(p_positive, min(irr_high, min(w_favorable, d_high))),
+            soc_high,
+            p_positive,
+            irr_high,
+            w_moderate,
+            d_high,
         ),
     )
+
+    # Favorable conditions before the battery reaches the Full-SOC
+    # fuzzy region.
     output_activation[4] = max(
         output_activation[4],
+        min(
+            soc_high_not_full,
+            p_positive,
+            irr_high,
+            w_favorable,
+            d_high,
+        ),
+    )
+
+    # ---------------------------------------------------------
+    # M5 - Three charging outputs
+    # ---------------------------------------------------------
+
+    # Full battery availability, positive power, high irradiance,
+    # favorable weather and high demand.
+    output_activation[5] = max(
+        output_activation[5],
         min(
             soc_full,
-            min(p_positive, min(solar_ok, min(weather_ok, d_high))),
-        ),
-    )
-    output_activation[4] = max(
-        output_activation[4],
-        min(soc_full, min(p_positive, demand_active)),
-    )
-
-    # Three-output rules.
-    output_activation[5] = max(
-        output_activation[5],
-        min(soc_full, min(p_positive, min(irr_high, d_high))),
-    )
-    output_activation[5] = max(
-        output_activation[5],
-        min(soc_full, min(p_positive, min(solar_ok, d_high))),
-    )
-    output_activation[5] = max(
-        output_activation[5],
-        min(soc_full, min(energy_ok, min(irr_high, d_high))),
-    )
-    output_activation[5] = max(
-        output_activation[5],
-        min(high_energy_service, weather_ok),
-    )
-    output_activation[5] = max(
-        output_activation[5],
-        min(
-            soc_high,
-            min(p_positive, min(irr_high, min(w_favorable, d_high))),
+            p_positive,
+            irr_high,
+            w_favorable,
+            d_high,
         ),
     )
 
-    # Conservative complementary rules.
-    output_activation[1] = max(
-        output_activation[1],
-        min(p_strong_negative, max(d_medium, d_high)),
-    )
-    output_activation[1] = max(
-        output_activation[1],
-        min(soc_low, min(p_negative, max(d_medium, d_high))),
-    )
-    output_activation[2] = max(
-        output_activation[2],
-        min(w_poor, min(soc_medium, energy_ok)),
-    )
+    # ---------------------------------------------------------
+    # Mamdani aggregation and centroid defuzzification
+    # ---------------------------------------------------------
 
     numerator = 0.0
     denominator = 0.0
@@ -994,22 +1070,43 @@ def evaluate_main_fis(
         mu_aggregated = 0.0
 
         for mode in range(6):
+
             if mode == 0:
-                mode_membership = trapmf(x, -0.5, 0.0, 0.35, 0.85)
+                mode_membership = trapmf(
+                    x, -0.5, 0.0, 0.35, 0.85
+                )
+
             elif mode == 1:
-                mode_membership = trimf(x, 0.3, 1.0, 1.7)
+                mode_membership = trimf(
+                    x, 0.3, 1.0, 1.7
+                )
+
             elif mode == 2:
-                mode_membership = trimf(x, 1.3, 2.0, 2.7)
+                mode_membership = trimf(
+                    x, 1.3, 2.0, 2.7
+                )
+
             elif mode == 3:
-                mode_membership = trimf(x, 2.3, 3.0, 3.7)
+                mode_membership = trimf(
+                    x, 2.3, 3.0, 3.7
+                )
+
             elif mode == 4:
-                mode_membership = trimf(x, 3.3, 4.0, 4.7)
+                mode_membership = trimf(
+                    x, 3.3, 4.0, 4.7
+                )
+
             else:
-                mode_membership = trapmf(x, 4.15, 4.65, 5.0, 5.5)
+                mode_membership = trapmf(
+                    x, 4.15, 4.65, 5.0, 5.5
+                )
 
             mu_aggregated = max(
                 mu_aggregated,
-                min(output_activation[mode], mode_membership),
+                min(
+                    output_activation[mode],
+                    mode_membership,
+                ),
             )
 
         numerator += x * mu_aggregated
@@ -1018,11 +1115,19 @@ def evaluate_main_fis(
     if denominator <= 0.0001:
         crisp_value = 0.0
         mode_number = 0
+
     else:
         crisp_value = numerator / denominator
-        # Arduino roundf() rounds positive half-values away from zero.
-        mode_number = int(math.floor(crisp_value + 0.5))
-        mode_number = max(0, min(5, mode_number))
+
+
+        mode_number = int(
+            math.floor(crisp_value + 0.5)
+        )
+
+        mode_number = max(
+            0,
+            min(5, mode_number),
+        )
 
     return {
         "centroid": crisp_value,
@@ -1044,14 +1149,7 @@ def evaluate_deterministic_layer(
     weather_index: float,
     battery_protection_state: str = "NORMAL",
 ) -> Dict[str, Any]:
-    """
-    Apply the deterministic restrictions represented in the ESP32 article v9.
 
-    The ESP32 simulation's persistence counter is represented in the cloud by
-    the incoming ``data_or_sensor_fault`` state. Dwell-time stabilization is
-    intentionally not implemented in this stage because a Lambda invocation is
-    stateless; it will be added later using persistent station state.
-    """
     requested_mode = fis_mode
     fault_state_level = 0
     functions_blocked = False
@@ -1072,9 +1170,8 @@ def evaluate_deterministic_layer(
         normalized_battery_protection_state == "RESTRICTED"
     )
 
-    # The station-reported battery state is also honored so the cloud follows
-    # the same recovery hysteresis as the ESP32. Local safety remains the
-    # authoritative layer if the two sides temporarily disagree.
+
+
     critical_energy_fault = critical_soc or local_battery_critical
     low_battery_restriction = (
         not critical_energy_fault
