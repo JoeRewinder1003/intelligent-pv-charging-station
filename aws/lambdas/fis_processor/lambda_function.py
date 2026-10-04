@@ -819,9 +819,9 @@ def evaluate_main_fis(
     # Net battery power [W]
     p_negative = trapmf(p_net_w, -400.0, -300.0, -60.0, 0.0)
     p_slight_negative = trapmf(p_net_w, -180.0, -120.0, -20.0, 20.0)
-    p_strong_negative = trapmf(p_net_w, -450.0, -350.0, -220.0, -120.0)
+    p_strong_negative = trapmf(p_net_w, -450.0, -450.0, -220.0, -120.0)
     p_balanced = trimf(p_net_w, -80.0, 0.0, 80.0)
-    p_positive = trapmf(p_net_w, 0.0, 60.0, 300.0, 400.0)
+    p_positive = trapmf(p_net_w, 0.0, 60.0, 400.0, 400.0)
 
     # Local irradiance [W/m²]
     irr_low = trapmf(

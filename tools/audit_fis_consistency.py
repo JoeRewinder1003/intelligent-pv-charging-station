@@ -70,9 +70,9 @@ def main_activations(soc, pnet, irradiance, weather, demand):
 
     p_negative = trapmf(pnet, -400.0, -300.0, -60.0, 0.0)
     p_slight_negative = trapmf(pnet, -180.0, -120.0, -20.0, 20.0)
-    p_strong_negative = trapmf(pnet, -450.0, -350.0, -220.0, -120.0)
+    p_strong_negative = trapmf(pnet, -450.0, -450.0, -220.0, -120.0)
     p_balanced = trimf(pnet, -80.0, 0.0, 80.0)
-    p_positive = trapmf(pnet, 0.0, 60.0, 300.0, 400.0)
+    p_positive = trapmf(pnet, 0.0, 60.0, 400.0, 400.0)
 
     irr_low = trapmf(irradiance, -50.0, 0.0, 150.0, 350.0)
     irr_med = trimf(irradiance, 250.0, 500.0, 750.0)
@@ -185,7 +185,8 @@ def main_activations(soc, pnet, irradiance, weather, demand):
         out[3],
         min(
             soc_high,
-            max(p_balanced, p_positive),
+            p_positive,
+            solar_available,
             d_low,
         ),
     )
@@ -328,7 +329,7 @@ def audit_weather():
 
 def audit_main():
     soc_values = range(0, 101, 5)
-    pnet_values = range(-300, 301, 50)
+    pnet_values = range(-450, 401, 50)
     irradiance_values = range(0, 1201, 100)
     weather_values = [0.1, 0.3, 0.5, 0.7, 0.9]
     demand_values = [0.1, 0.3, 0.5, 0.7, 0.9]
@@ -399,6 +400,68 @@ def audit_main():
             f"DI={case[4]:.1f}"
         )
 
+def audit_main_legacy_domain():
+    soc_values = range(0, 101, 5)
+    pnet_values = range(-300, 301, 50)
+    irradiance_values = range(0, 1201, 100)
+    weather_values = [0.1, 0.3, 0.5, 0.7, 0.9]
+    demand_values = [0.1, 0.3, 0.5, 0.7, 0.9]
+
+    total = 0
+    uncovered = []
+    modes = set()
+
+    min_centroid = float("inf")
+    max_centroid = float("-inf")
+
+    for soc in soc_values:
+        for pnet in pnet_values:
+            for irr in irradiance_values:
+                for weather in weather_values:
+                    for demand in demand_values:
+                        total += 1
+
+                        activations = main_activations(
+                            soc,
+                            pnet,
+                            irr,
+                            weather,
+                            demand,
+                        )
+
+                        if max(activations) <= 1e-9:
+                            uncovered.append(
+                                (soc, pnet, irr, weather, demand)
+                            )
+
+                        result = fis.evaluate_main_fis(
+                            soc,
+                            pnet,
+                            irr,
+                            weather,
+                            demand,
+                        )
+
+                        modes.add(result["fis_mode"])
+                        min_centroid = min(
+                            min_centroid,
+                            result["centroid"],
+                        )
+                        max_centroid = max(
+                            max_centroid,
+                            result["centroid"],
+                        )
+
+    print("\n=== LEGACY MAIN FIS DOMAIN REGRESSION ===")
+    print(f"Grid combinations:        {total}")
+    print(f"Uncovered combinations:   {len(uncovered)}")
+    print(
+        f"Uncovered percentage:     "
+        f"{100 * len(uncovered) / total:.2f}%"
+    )
+    print(f"Reachable modes:          {sorted(modes)}")
+    print(f"Minimum centroid:         {min_centroid:.4f}")
+    print(f"Maximum centroid:         {max_centroid:.4f}")
 
 def audit_monotonicity():
     print("\n=== BASIC MONOTONICITY AUDIT ===")
@@ -545,5 +608,6 @@ def inspect_main_cases():
 if __name__ == "__main__":
     audit_weather()
     audit_main()
+    audit_main_legacy_domain()
     audit_monotonicity()
     inspect_main_cases()
